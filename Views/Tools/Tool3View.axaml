@@ -1,0 +1,48 @@
+﻿<UserControl x:Class="RobotAIArm.Views.Tools.Tool3View"
+             xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:vm="using:RobotAIArm.ViewModels.Tools"
+             mc:Ignorable="d"
+             d:DesignWidth="300" d:DesignHeight="400"
+             x:DataType="vm:Tool3ViewModel" x:CompileBindings="True">
+      <Grid RowDefinitions="Auto, *, Auto"  ColumnDefinitions="*, Auto" Margin="10">
+        <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="10" Margin="0,0,0,10">
+            <TextBlock Text="Port:" VerticalAlignment="Center"/>
+            <ComboBox Name="PortComboBox" MinWidth="150"
+                      ItemsSource="{Binding AvailablePorts}"
+                      SelectedItem="{Binding SelectedPort}"/>
+            <Button Name="ConnectButton"
+                    Content="{Binding ConnectButtonText}"
+                    Command="{Binding ConnectCommand}"/>
+            <TextBlock Text="{Binding ConnectionStatus}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+        </StackPanel>
+
+        <Border Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
+                BorderBrush="Gray" BorderThickness="1"
+                CornerRadius="3" Padding="1" Margin="0,0,0,5">
+            <ScrollViewer Name="ConsoleScrollViewer">
+                 <TextBlock Name="ConsoleOutputTextBlock"
+                           Text="{Binding ConsoleOutputText}"
+                           Margin="5"
+                           TextWrapping="Wrap"
+                           FontFamily="Consolas,Monospace" />
+                 </ScrollViewer>
+        </Border>
+
+        <TextBox Grid.Row="2" Grid.Column="0"
+                 Name="CommandInputTextBox"
+                 Watermark="Enter Serial Command..."
+                 Text="{Binding CommandToSend}"
+                 Margin="0,0,5,0"/> 
+                 
+                 
+        <Button Grid.Row="2" Grid.Column="1"
+                Name="SendCommandButton"
+                Content="Send"
+                Command="{Binding SendCommand}"
+                MinWidth="80"/>
+
+    </Grid>
+</UserControl>

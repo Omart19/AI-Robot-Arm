@@ -1,0 +1,81 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <IsPackable>False</IsPackable>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AvaloniaNameGeneratorBehavior>OnlyProperties</AvaloniaNameGeneratorBehavior>
+  </PropertyGroup>
+
+  <ItemGroup>
+		<Content Include="newarm\**">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+	</ItemGroup>
+    <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.2.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.2.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.2.1" />
+    <!--Condition below is needed to remove Avalonia.Diagnostics package from build output in Release configuration.-->
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.2.1">
+      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
+      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
+    <PackageReference Include="Iot.Device.Bindings" Version="3.2.0" />
+    <PackageReference Include="System.Device.Gpio" Version="3.2.0" />
+    <PackageReference Include="Avalonia.ReactiveUI" Version="11.2.1" />
+    <PackageReference Include="SDL2-CS" Version="2.0.0" />
+    <PackageReference Include="SharpGLTF.Core" Version="1.0.3" />
+    <PackageReference Include="SharpGLTF.Runtime" Version="1.0.3" />
+    <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.3" />
+    <PackageReference Include="Veldrid" Version="4.9.0" />
+    <PackageReference Include="Veldrid.SPIRV" Version="1.0.15" />
+    <PackageReference Include="Veldrid.SDL2" Version="4.9.0" />
+    <PackageReference Include="Veldrid.StartupUtilities" Version="4.9.0" />
+        <PackageReference Include="Veldrid.Utilities" Version="4.9.0" />
+
+    </ItemGroup>
+
+
+  <ItemGroup>
+    <Reference Include="Dock.Serializer.dll">
+  <HintPath>bin\DLLpackages\Dock.Serializer.dll</HintPath>
+</Reference>
+<Reference Include="Dock.Model.Avalonia.dll">
+  <HintPath>bin\DLLpackages\Dock.Model.Avalonia.dll</HintPath>
+</Reference>
+<Reference Include="Dock.Model.dll">
+  <HintPath>bin\DLLpackages\Dock.Model.dll</HintPath>
+</Reference>
+<Reference Include="Dock.Avalonia.dll">
+  <HintPath>bin\DLLpackages\Dock.Avalonia.dll</HintPath>
+</Reference>
+<Reference Include="Avalonia.Controls.Recycling.Model.dll">
+  <HintPath>bin\DLLpackages\Avalonia.Controls.Recycling.Model.dll</HintPath>
+</Reference>
+<Reference Include="Avalonia.Controls.ProportionalStackPanel.dll">
+  <HintPath>bin\DLLpackages\Avalonia.Controls.ProportionalStackPanel.dll</HintPath>
+</Reference>
+<Reference Include="Avalonia.MarkupExtension.dll">
+  <HintPath>bin\DLLpackages\Avalonia.MarkupExtension.dll</HintPath>
+</Reference>
+<Reference Include="Avalonia.Controls.Recycling.dll">
+  <HintPath>bin\DLLpackages\Avalonia.Controls.Recycling.dll</HintPath>
+</Reference>
+<Reference Include="Dock.Model.ReactiveUI.dll">
+  <HintPath>bin\DLLpackages\Dock.Model.ReactiveUI.dll</HintPath>
+</Reference>
+<Reference Include="Dock.Settings.dll">
+  <HintPath>bin\DLLpackages\Dock.Settings.dll</HintPath>
+</Reference>
+<Reference Include="Dock.Model.Mvvm.dll">
+  <HintPath>bin\DLLpackages\Dock.Model.Mvvm.dll</HintPath>
+</Reference>
+  </ItemGroup>
+
+</Project>
