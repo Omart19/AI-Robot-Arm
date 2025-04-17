@@ -11,7 +11,6 @@ namespace RobotAIArm.Controllers
     {
         public List<string> ReadDataFromSensors()
         {
-            Console.WriteLine("Starting to read data from sensors...");
             int busId = 1; // Adjust for your system
             int tcaAddress = 0x70; // TCA9548A address
             var sensorAddresses = new Dictionary<int, int>
@@ -30,13 +29,11 @@ namespace RobotAIArm.Controllers
                 try
                 {
                     // Select the channel
-                    Console.WriteLine($"Selecting channel {channel}...");
                     SelectTcaChannel(i2cBus, tcaAddress, channel);
 
                     // Read sensor value
                     int angle = ReadSensorValue(i2cBus, sensorAddresses[channel]);
 
-                    Console.WriteLine($"Channel {channel}: Angle = {angle}");
                     angles.Add(angle.ToString());
                 }
                 catch (Exception ex)
@@ -47,11 +44,11 @@ namespace RobotAIArm.Controllers
             }
 
             // Output all angles
-            Console.WriteLine("Final Angles:");
-            for (int i = 0; i < angles.Count; i++)
-            {
-                Console.WriteLine($"Channel {i}: {angles[i]}");
-            }
+            // Console.WriteLine("Final Angles:");
+            // for (int i = 0; i < angles.Count; i++)
+            // {
+            //     Console.WriteLine($"Channel {i}: {angles[i]}");
+            // }
 
             return angles;
         }
@@ -66,7 +63,7 @@ namespace RobotAIArm.Controllers
                 // Optional: Add a small delay to ensure the channel is active
                 System.Threading.Thread.Sleep(10);
 
-                Console.WriteLine($"Channel {channel} selected with mask: 0x{channelMask:X2}");
+                //Console.WriteLine($"Channel {channel} selected with mask: 0x{channelMask:X2}");
             }
         }
 
@@ -81,7 +78,7 @@ namespace RobotAIArm.Controllers
                     sensorDevice.WriteByte(0x0C); // Start at register 0x0C
                     sensorDevice.Read(buffer);
 
-                    Console.WriteLine($"Read data: MSB=0x{buffer[0]:X2}, LSB=0x{buffer[1]:X2}");
+                    //Console.WriteLine($"Read data: MSB=0x{buffer[0]:X2}, LSB=0x{buffer[1]:X2}");
 
                     // Combine bytes into 12-bit angle value
                     int rawAngle = ((buffer[0] << 8) | buffer[1]) & 0x0FFF;

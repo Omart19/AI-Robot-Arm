@@ -26,8 +26,8 @@ public class DockFactory : Factory
     {
         
         var tool1 = new Tool1ViewModel {Id = "Tool1", Title = "Camera View"};
-        var tool2 = new Tool2ViewModel {Id = "Tool2", Title = "Tool2"};
-        var tool3 = new Tool3ViewModel {Id = "Tool3", Title = "Tool3"};
+        var tool2 = new Tool2ViewModel {Id = "Tool2", Title = "Angles"};
+        var tool3 = new Tool3ViewModel {Id = "Tool3", Title = "Activity"};
         var tool4 = new Tool4ViewModel {Id = "Tool4", Title = "Tool4"};
         var tool5 = new Tool5ViewModel {Id = "Tool5", Title = "3D View"};
 

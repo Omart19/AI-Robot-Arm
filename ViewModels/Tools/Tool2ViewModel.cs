@@ -43,7 +43,7 @@ public class Tool2ViewModel : Tool
 {
     // Create a list to store the angles
     List<string> anglesList = new List<string>();
-    Console.WriteLine("Reading angles");
+    //Console.WriteLine("Reading angles");
 
     // Read data from each sensor
     anglesList.AddRange(_sensorController.ReadDataFromSensors());
@@ -56,7 +56,7 @@ public class Tool2ViewModel : Tool
         {
             string labeledAngle = $"{angleLabels[index]} {angle}"; 
             EncoderAngles.Add(labeledAngle);
-            Console.WriteLine($"Added angle: {labeledAngle}"); 
+            //Console.WriteLine($"Added angle: {labeledAngle}"); 
         }
     });
 }
