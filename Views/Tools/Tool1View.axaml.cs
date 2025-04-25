@@ -8,12 +8,14 @@ namespace RobotAIArm.Views.Tools;
 public partial class Tool1View : UserControl
 {
     private CameraController? _cameraController;
+    private ArduinoController _arduinoController = new ArduinoController();
+
 
     public Tool1View()
     {
         InitializeComponent();
         var cameraImage = this.Find<Image>("CameraImage");
-        _cameraController = new CameraController(cameraImage);
+    _cameraController = new CameraController(cameraImage, _arduinoController);
     }
 
     private void InitializeComponent()

@@ -49,9 +49,9 @@ namespace RobotAIArm.ViewModels.Tools
 
         // --- Constructor ---
 
-        public Tool3ViewModel()
+        public Tool3ViewModel(ArduinoController arduinoController)
         {
-            _arduinoController = new ArduinoController();
+            _arduinoController = arduinoController;
             _arduinoController.LogMessageAvailable += HandleArduinoLogMessage;
 
             LoadAvailablePorts();

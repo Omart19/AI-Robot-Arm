@@ -192,38 +192,41 @@ if (success)
 {
     if (!IsConnected || _serialPort == null)
     {
-        // Use RaiseLogEvent for consistency, even for errors before sending
         RaiseLogEvent("Error: Cannot send command - Not connected.");
         return;
     }
 
-    // Use Task.Run for the write operation to prevent blocking UI
     await Task.Run(() =>
     {
         try
         {
-            // ** FIX: Use RaiseLogEvent to send log to UI **
-            RaiseLogEvent($"TX: {command}"); // Log the command being sent via the event
-
-            // Actually send the command
-            _serialPort.WriteLine(command);
+            if (_serialPort?.IsOpen == true)
+            {
+                _serialPort.WriteLine(command);
+                RaiseLogEvent($"TX: {command}");
+            }
+            else
+            {
+                RaiseLogEvent("Error: Serial port is closed.");
+            }
         }
         catch (TimeoutException ex)
         {
             RaiseLogEvent($"Error: Write Timeout: {ex.Message}");
         }
-        catch (InvalidOperationException ex) // Port might have been closed unexpectedly
+        catch (InvalidOperationException ex)
         {
             RaiseLogEvent($"Error: Send failed (port closed?): {ex.Message}");
-            // Attempt to update state via Disconnect, which also raises events
-            Disconnect(); // Attempt cleanup
+            Disconnect();
         }
         catch (Exception ex)
         {
             RaiseLogEvent($"Error: Sending command: {ex.Message}");
         }
-    });
+    }).ConfigureAwait(false); // ? SUPER IMPORTANT: Don't capture the UI thread
 }
+
+    
     // --- Receiving Data ---
 
     private void SerialPort_DataReceived(object sender, SerialDataReceivedEventArgs e)

@@ -34,7 +34,6 @@ net = cv2.dnn.readNetFromCaffe(
 )
 print("? Loaded MobileNet SSD", flush=True)
 
-# List of class names
 classNames = [
     "background", "aeroplane", "bicycle", "bird", "boat", "bottle",
     "bus", "car", "cat", "chair", "cow", "diningtable", "dog", "horse",
@@ -47,15 +46,17 @@ while True:
         print("? Frame read failed", flush=True)
         continue
 
-    # Flip 180if camera is upside-down
+    # Flip camera view
     frame = cv2.rotate(frame, cv2.ROTATE_180)
 
-    # Face detection (green boxes)
+    label_to_send = "none"
+
+    # Face detection (green box)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray, 1.2, 4)
-    #print(f"? Detected {len(faces)} face(s)", flush=True)
     for (x, y, w, h) in faces:
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 4)  # green
+        label_to_send = "person"
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 4)
 
     # Object detection (red boxes)
     blob = cv2.dnn.blobFromImage(frame, 0.007843, (300, 300), 127.5)
@@ -67,24 +68,28 @@ while True:
         if confidence > 0.5:
             idx = int(detections[0, 0, i, 1])
             label = classNames[idx] if idx < len(classNames) else "unknown"
+            label_to_send = label
 
-            box = detections[0, 0, i, 3:7] * [frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]]
+            box = detections[0, 0, i, 3:7] * [
+                frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]
+            ]
             (startX, startY, endX, endY) = box.astype("int")
-
-            cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 0, 255), 3)  # red
+            cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 0, 255), 3)
             cv2.putText(frame, label, (startX, startY - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-    # Encode and send JPEG
+    # Encode frame
     success, jpeg = cv2.imencode('.jpg', frame)
     if not success:
         print("? JPEG encode failed", flush=True)
         continue
 
     jpeg_bytes = jpeg.tobytes()
+
     try:
+        # Always send label before frame
+        client.sendall(f"LABEL:{label_to_send}\n".encode('utf-8'))
         client.sendall(struct.pack(">I", len(jpeg_bytes)))
         client.sendall(jpeg_bytes)
-        #print(f"? Sent frame: {len(jpeg_bytes)} bytes", flush=True)
     except Exception as e:
         print(f"? Socket send failed: {e}", flush=True)
         break

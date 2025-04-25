@@ -9,6 +9,7 @@ using Dock.Model.Controls;
 using Dock.Model.Core;
 using Dock.Model.Mvvm;
 using Dock.Model.Mvvm.Controls;
+using RobotAIArm.Controllers;
 
 namespace RobotAIArm.ViewModels;
 
@@ -16,6 +17,8 @@ public class DockFactory : Factory
 {
     private readonly object _context;
     private IRootDock? _rootDock;
+    private readonly ArduinoController _arduinoController = new ArduinoController();
+
     public DockFactory(object context)
     {
         _context = context;
@@ -25,9 +28,9 @@ public class DockFactory : Factory
     public override IRootDock CreateLayout()
     {
         
-        var tool1 = new Tool1ViewModel {Id = "Tool1", Title = "Camera View"};
+        var tool1 = new Tool1ViewModel(_arduinoController) {Id = "Tool1", Title = "Camera View"};
         var tool2 = new Tool2ViewModel {Id = "Tool2", Title = "Angles"};
-        var tool3 = new Tool3ViewModel {Id = "Tool3", Title = "Activity"};
+        var tool3 = new Tool3ViewModel(_arduinoController) {Id = "Tool3", Title = "Activity"};
         var tool4 = new Tool4ViewModel {Id = "Tool4", Title = "Tool4"};
         var tool5 = new Tool5ViewModel {Id = "Tool5", Title = "3D View"};
 
