@@ -44,7 +44,12 @@
           </MenuItem.Icon>
         </MenuItem>
         <Separator />
-        <!-- <MenuItem x:Name="3DViewToggled" 
+		  <ComboBox Grid.Column="5" SelectedIndex="0" x:Name="ModeSelector">
+			  <ComboBoxItem Content="Local Control" />
+			  <ComboBoxItem Content="Remote Control (Connect to Pi)" />
+		  </ComboBox>
+
+		  <!-- <MenuItem x:Name="3DViewToggled" 
                   Header="3D View Toggle" 
                   Command="{Binding ToggleTool5Command}">
           <MenuItem.Icon>

@@ -21,43 +21,59 @@ public class Tool2ViewModel : Tool
     };
 
     public ObservableCollection<string> EncoderAngles { get; } = new ObservableCollection<string>();
+    // Inside Tool2ViewModel
+
     public Tool2ViewModel()
     {
-
-
-        _sensorController = new MagneticEncoderController();
-
-        // Start a task to read the encoder angles periodically
-        Task.Run(async () =>
+        if (AppSettings.Instance.IsRemoteMode)
         {
-            while (true)
+            SignalController.Instance.EncodersReceived += OnEncodersReceived;
+        }
+        else
+        {
+            _sensorController = new MagneticEncoderController();
+            Task.Run(async () =>
             {
-                await ReadAndUpdateEncoderAngles();
-                await Task.Delay(100); // Update every 100ms (adjust as needed)
+                while (true)
+                {
+                    await ReadAndUpdateEncoderAngles();
+                    await Task.Delay(100);
+                }
+            });
+        }
+    }
+
+    private async void OnEncodersReceived(int[] encoders)
+    {
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            EncoderAngles.Clear();
+            for (int i = 0; i < encoders.Length; i++)
+            {
+                EncoderAngles.Add($"{angleLabels[i]} {encoders[i]}");
             }
         });
-
-        
     }
+
     private async Task ReadAndUpdateEncoderAngles()
-{
-    // Create a list to store the angles
-    List<string> anglesList = new List<string>();
-    //Console.WriteLine("Reading angles");
-
-    // Read data from each sensor
-    anglesList.AddRange(_sensorController.ReadDataFromSensors());
-
-    // Update the ObservableCollection on the UI thread
-    await Dispatcher.UIThread.InvokeAsync(() =>
     {
-        EncoderAngles.Clear();
-        foreach (var (angle, index) in anglesList.Select((value, i) => (value, i))) 
+        // Create a list to store the angles
+        List<string> anglesList = new List<string>();
+        //Console.WriteLine("Reading angles");
+
+        // Read data from each sensor
+        anglesList.AddRange(_sensorController.ReadDataFromSensors());
+
+        // Update the ObservableCollection on the UI thread
+        await Dispatcher.UIThread.InvokeAsync(() =>
         {
-            string labeledAngle = $"{angleLabels[index]} {angle}"; 
-            EncoderAngles.Add(labeledAngle);
-            //Console.WriteLine($"Added angle: {labeledAngle}"); 
-        }
-    });
-}
+            EncoderAngles.Clear();
+            foreach (var (angle, index) in anglesList.Select((value, i) => (value, i)))
+            {
+                string labeledAngle = $"{angleLabels[index]} {angle}";
+                EncoderAngles.Add(labeledAngle);
+                //Console.WriteLine($"Added angle: {labeledAngle}"); 
+            }
+        });
+    }
 }

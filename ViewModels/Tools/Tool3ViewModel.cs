@@ -86,7 +86,7 @@ namespace RobotAIArm.ViewModels.Tools
                     HandleArduinoLogMessage(this, "Error: No serial port selected.");
                 }
             }
-             // Re-evaluate CanExecute for the command itself
+            // Re-evaluate CanExecute for the command itself
             ConnectCommand.NotifyCanExecuteChanged();
             SendCommand.NotifyCanExecuteChanged(); // Send command state might change
         }
@@ -96,12 +96,12 @@ namespace RobotAIArm.ViewModels.Tools
         [RelayCommand(CanExecute = nameof(CanSendCommand))]
         private async Task SendAsync() // Renamed from SendCommand to avoid conflict with property name convention
         {
-             if (CanSendCommand()) // Redundant check, but safe
-             {
+            if (CanSendCommand()) // Redundant check, but safe
+            {
                 string command = CommandToSend; // Copy command before clearing
                 CommandToSend = ""; // Clear input box immediately (updates via ObservableProperty)
                 await _arduinoController.SendCommandAsync(command);
-             }
+            }
         }
 
 
@@ -121,7 +121,7 @@ namespace RobotAIArm.ViewModels.Tools
 
             if (!AvailablePorts.Any())
             {
-                 HandleArduinoLogMessage(this, "Warning: No serial ports found.");
+                HandleArduinoLogMessage(this, "Warning: No serial ports found.");
             }
             // Ensure connect command state is updated after loading ports
             ConnectCommand.NotifyCanExecuteChanged();
@@ -135,13 +135,13 @@ namespace RobotAIArm.ViewModels.Tools
 
             // Update connection state based on specific messages
             bool newConnectionState = _arduinoController.IsConnected; // Check current actual state
-             if (message.Contains("opened successfully")) newConnectionState = true;
-             if (message.Contains("closed") || message.Contains("Disconnecting") || (message.StartsWith("Error:") && message.Contains("port closed?")) || message.Contains("Failed to connect")) newConnectionState = false;
+            if (message.Contains("opened successfully")) newConnectionState = true;
+            if (message.Contains("closed") || message.Contains("Disconnecting") || (message.StartsWith("Error:") && message.Contains("port closed?")) || message.Contains("Failed to connect")) newConnectionState = false;
 
-             if (IsConnected != newConnectionState)
-             {
-                 UpdateUiConnectionState(newConnectionState);
-             }
+            if (IsConnected != newConnectionState)
+            {
+                UpdateUiConnectionState(newConnectionState);
+            }
         }
 
         // Method to append messages to the log TextBlock property
@@ -169,17 +169,17 @@ namespace RobotAIArm.ViewModels.Tools
             // Alternatively, raise an event the View subscribes to trigger scroll.
         }
 
-         private void UpdateUiConnectionState(bool connectedState)
-         {
-             // Assumes already on UI thread
-             IsConnected = connectedState; // This triggers PropertyChanged via [ObservableProperty]
-             ConnectButtonText = IsConnected ? "Disconnect" : "Connect";
-             ConnectionStatus = IsConnected ? $"Connected ({_arduinoController.ConfiguredPortName})" : "Disconnected";
+        private void UpdateUiConnectionState(bool connectedState)
+        {
+            // Assumes already on UI thread
+            IsConnected = connectedState; // This triggers PropertyChanged via [ObservableProperty]
+            ConnectButtonText = IsConnected ? "Disconnect" : "Connect";
+            ConnectionStatus = IsConnected ? $"Connected ({_arduinoController.ConfiguredPortName})" : "Disconnected";
 
-             // Important: Manually notify dependent command states
-             ConnectCommand.NotifyCanExecuteChanged();
-             SendCommand.NotifyCanExecuteChanged();
-         }
+            // Important: Manually notify dependent command states
+            ConnectCommand.NotifyCanExecuteChanged();
+            SendCommand.NotifyCanExecuteChanged();
+        }
 
 
         // --- Cleanup ---

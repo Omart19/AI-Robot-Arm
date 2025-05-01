@@ -2,6 +2,7 @@
 using Avalonia.Markup.Xaml;
 using Dock.Avalonia;
 using Dock.Settings;
+using System;
 
 namespace RobotAIArm.Views;
 
@@ -61,7 +62,23 @@ public partial class MainView : UserControl
                 }
             };
         }
+        var modeSelector = this.FindControl<ComboBox>("ModeSelector");
+        if (modeSelector != null)
+        {
+            modeSelector.SelectionChanged += (_, _) =>
+            {
+                if (modeSelector.SelectedIndex == 1)
+                {
+                    AppSettings.Instance.IsRemoteMode = true;
+                }
+                else
+                {
+                    AppSettings.Instance.IsRemoteMode = false;
+                }
+                Console.WriteLine($"[INFO] Mode changed. Remote mode: {AppSettings.Instance.IsRemoteMode}");
+            };
+        }
 
-        
+
     }
 }

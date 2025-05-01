@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "RobotAIArm": {
+      "commandName": "Project",
+      "nativeDebugging": true
+    }
+  }
+}

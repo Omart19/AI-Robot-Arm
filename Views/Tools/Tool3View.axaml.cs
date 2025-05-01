@@ -12,7 +12,7 @@ namespace RobotAIArm.Views.Tools
 
         public Tool3View()
         {
-            InitializeComponent();                                                            
+            InitializeComponent();
 
             // Find the control
             // CommandInputTextBox = this.FindControl<TextBox>("CommandInputTextBox")
@@ -40,7 +40,7 @@ namespace RobotAIArm.Views.Tools
         //The InitializeComponent method defined by the partial class generator
         private void InitializeComponent()
         {
-           AvaloniaXamlLoader.Load(this);
+            AvaloniaXamlLoader.Load(this);
         }
     }
 }
