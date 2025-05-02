@@ -3,10 +3,12 @@ using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using System;
 using System.Diagnostics;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection.Emit;
 using System.Text;
 using System.Threading;
 using System.Threading.Channels;
@@ -15,185 +17,124 @@ using System.Threading.Tasks;
 namespace RobotAIArm.Controllers
 {
     // Implement IAsyncDisposable for proper async cleanup
+    internal record FrameDataPacket(byte[] JpegBytes, int[]? EncoderValues);
+    internal record ProcessedData(Bitmap? ProcessedBitmap, int[]? EncoderValues);
+
+
     public class CameraController : IDisposable, IAsyncDisposable
     {
-        private readonly Image _cameraImage;
+        // --- UI and Core Logic Fields ---
+        private readonly Image _cameraImage; // Reference to the UI Image control
         private readonly ArduinoController _arduino;
         private Process? _visionProcess;
-
-        // Network resources - make nullable
-        private TcpClient? _client;           // Connection to Pi Camera Port (23456)
-        private NetworkStream? _networkStream;
-        private TcpClient? _visionClient;     // Connection to local Vision.py (34567)
-        private NetworkStream? visionStream;
-        private TcpClient? _commandClient;    // Connection to Pi Command Port (23457)
-        private NetworkStream? _commandStream;
-        private StreamWriter? _commandWriter; // Writer for commands
-
         private CancellationTokenSource? _cts;
-        private bool _disposed = false; // To detect redundant calls
+        private bool _disposed = false;
 
-        // Channel for decoupling processing
-        private readonly Channel<byte[]> _processingChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(5)
+        // --- Network Fields ---
+        private TcpClient? _client;
+        private NetworkStream? _networkStream;
+        private TcpClient? _visionClient;
+        private NetworkStream? visionStream;
+        private TcpClient? _commandClient;
+        private NetworkStream? _commandStream;
+        private StreamWriter? _commandWriter;
+
+        // --- Channel for decoupling Receive from Processing ---
+        private readonly Channel<FrameDataPacket> _processingChannel = Channel.CreateBounded<FrameDataPacket>(new BoundedChannelOptions(5) // Buffer size
         {
             FullMode = BoundedChannelFullMode.DropOldest
         });
 
+        // --- Fields for Throttled UI Update ---
+        private readonly object _latestResultLock = new object();
+        private ProcessedData? _latestProcessedData = null; // Stores combined result
+        private bool _newResultAvailable = false;          // Flag for the timer
+        private DispatcherTimer? _uiUpdateTimer;           // Timer for UI updates
+
         public CameraController(Image cameraImage, ArduinoController arduino)
         {
             _cameraImage = cameraImage;
-            _arduino = arduino; // Assuming ArduinoController is used elsewhere
-
-            // Subscribe to mode changes
-            //SignalController.Instance.ModeChanged += OnModeChanged;
-            // Note: OnFrameReceived might be obsolete if ProcessingLoop updates UI
+            _arduino = arduino; 
         }
 
-        // This method might not be needed if ProcessingLoop handles UI updates
-        // based on the *processed* image. Keep if you need raw image display too.
-        /*
-        private void OnFrameReceived(byte[] frameBytes)
-        {
-            // ... (implementation if needed) ...
-        }
-        */
+        
         private async Task StopCameraFeedAsync()
         {
-            Console.WriteLine("[CameraController] Stopping camera feed...");
+            // Only proceed if not already disposed
+            if (_disposed) return;
+
+            Console.WriteLine("[CameraController] Stopping camera feed (Full Stop)...");
             try
             {
-                // 1. Signal cancellation to loops
+                // 1. Signal cancellation to loops (if CTS exists and not already requested)
                 if (_cts != null && !_cts.IsCancellationRequested)
-                {
-                    _cts.Cancel();
-                    Console.WriteLine("[CameraController] Cancellation token signaled.");
-                }
-                _cts?.Dispose(); // Dispose the CTS itself
-                _cts = null;
-
-                // 2. Close network streams and clients
-                _networkStream?.Dispose(); // Dispose Pi stream
-                _networkStream = null;
-                _client?.Dispose(); // Dispose Pi client
-                _client = null;
-
-                visionStream?.Dispose(); // Dispose vision stream
-                visionStream = null;
-                _visionClient?.Dispose(); // Dispose vision client
-                _visionClient = null;
-                Console.WriteLine("[CameraController] Network connections closed.");
-
-
-                // 3. Terminate Python process
-                if (_visionProcess != null && !_visionProcess.HasExited) // Check if already exited
                 {
                     try
                     {
-                        Console.WriteLine($"[CameraController] Killing Vision process (PID: {_visionProcess.Id})...");
-                        _visionProcess.Kill(true); // Kill process and its children
+                        _cts.Cancel();
+                        Console.WriteLine("[CameraController] Cancellation token signaled.");
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        Console.WriteLine("[CameraController] Cancellation token source already disposed.");
+                    }
+                }
+                // Don't dispose _cts here yet, Dispose/DisposeAsync handles that
 
-                        // --- Correct way to await exit with timeout ---
+                // 2. Close network streams and clients using the helper
+                CleanupNetworkResources();
+
+                // 3. Terminate Python process (Keep existing logic with correction)
+                if (_visionProcess != null && !_visionProcess.HasExited)
+                {
+                    // ... (Keep the corrected process termination logic from previous answer) ...
+                    try
+                    {
+                        Console.WriteLine($"[CameraController] Killing Vision process (PID: {_visionProcess.Id})...");
+                        _visionProcess.Kill(true);
                         Console.WriteLine("[CameraController] Waiting for vision process exit (max 5s)...");
-                        // Create a CancellationTokenSource that cancels after 5 seconds
                         using var exitCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                        try
-                        {
-                            // Wait for the process to exit OR the timeout token to be cancelled
-                            await _visionProcess.WaitForExitAsync(exitCts.Token);
-                            Console.WriteLine("[CameraController] Vision process exited gracefully after kill signal.");
-                        }
-                        catch (OperationCanceledException) // Thrown if the timeout (exitCts.Token) expires before exit
-                        {
-                            Console.WriteLine("[CameraController] Timeout expired waiting for vision process exit.");
-                            // Process might still be running, but we stop waiting.
-                        }
-                        // --- End corrected wait ---
+                        try { await _visionProcess.WaitForExitAsync(exitCts.Token); Console.WriteLine("[CameraController] Vision process exited gracefully after kill signal."); }
+                        catch (OperationCanceledException) { Console.WriteLine("[CameraController] Timeout expired waiting for vision process exit."); }
                     }
-                    catch (InvalidOperationException ioEx)
-                    {
-                        // Process may have already exited between check and Kill/WaitForExitAsync
-                        Console.WriteLine($"[CameraController] Info: Error managing vision process (may have already exited): {ioEx.Message}");
-                    }
-                    catch (Exception procEx)
-                    {
-                        Console.WriteLine($"[CameraController] Error killing/waiting for vision process: {procEx.Message}");
-                    }
-                    finally
-                    {
-                        // Ensure dispose happens even if errors occurred
-                        _visionProcess.Dispose();
-                        _visionProcess = null;
-                    }
+                    catch (InvalidOperationException ioEx) { Console.WriteLine($"[CameraController] Info: Error managing vision process (may have already exited): {ioEx.Message}"); }
+                    catch (Exception procEx) { Console.WriteLine($"[CameraController] Error killing/waiting for vision process: {procEx.Message}"); }
+                    finally { try { _visionProcess.Dispose(); } catch { } _visionProcess = null; } // Ensure dispose happens
                 }
                 else
                 {
-                    // If process handle exists but process already exited
-                    _visionProcess?.Dispose();
+                    try { _visionProcess?.Dispose(); } catch { } // Dispose if handle exists but process exited
                     _visionProcess = null;
                 }
 
-
-                // 4. Clear the processing channel (optional, good practice)
-                // Try reading remaining items to allow writer completion if stuck
+                // 4. Clear the processing channel (Optional, helps if producer finished mid-write)
                 while (_processingChannel.Reader.TryRead(out _)) { }
 
-
-                Console.WriteLine("[CameraController] Camera feed stopped.");
+                Console.WriteLine("[CameraController] Camera feed stopped (Full Stop).");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[CameraController] Error stopping camera feed: {ex.Message}");
+                Console.WriteLine($"[CameraController] Error during full stop: {ex.Message}");
             }
         }
-
-        //private async void OnModeChanged(bool isRemote)
-        //{
-        //    Console.WriteLine($"[CameraController] Mode changed handler invoked. Remote={isRemote}");
-
-        //    // --- Stop Existing Feed ---
-        //    // DisposeAsyncCore (called via StopCameraFeedAsync -> DisposeAsync) handles cancellation and cleanup
-        //    await StopCameraFeedAsync(); // Ensure previous state is cleaned up
-
-        //    if (isRemote)
-        //    {
-        //        Console.WriteLine("[CameraController] Mode changed to Remote. Starting setup...");
-        //        // --- Start Vision Script ---
-        //        StartVisionPipelineRemote(); // Start the local Python script first
-
-        //        // --- Attempt Connection (which now includes starting loops) ---
-        //        // Run the connection attempts in the background.
-        //        // The ConnectToPiServerAsync loop handles retries internally.
-        //        _ = ConnectToPiServerAsync(); // Fire and forget the connection loop task
-        //    }
-        //    else
-        //    {
-        //        Console.WriteLine("[CameraController] Mode changed to Local. Ensuring remote connections are stopped.");
-        //        StartVisionPipelineLocal(); // Placeholder for local mode logic if any
-        //        // StopCameraFeedAsync already cleaned up remote connections
-        //    }
-        //}
-        public async Task SetModeAsync(bool isRemote) // Changed from private async void OnModeChanged
+        public async Task SetModeAsync(bool isRemote)
         {
             Console.WriteLine($"[CameraController] SetModeAsync called. Remote={isRemote}");
 
-            // --- Stop Existing Feed ---
-            await StopCameraFeedAsync(); // Stop previous state first
+            await StopCameraFeedAsync(); // Stop previous state first (this will also stop the timer)
 
             if (isRemote)
             {
                 Console.WriteLine("[CameraController] SetModeAsync: Setting up Remote mode...");
-                // --- Start Vision Script ---
                 StartVisionPipelineRemote();
-
-                // --- Attempt Connection ---
-                // Run connection attempts in the background. Handles retries internally.
-                _ = ConnectToPiServerAsync();
+                // ConnectToPiServerAsync will be called, which starts loops and then the timer
+                _ = ConnectToPiServerAsync(); // Fire-and-forget connection loop task
             }
             else
             {
                 Console.WriteLine("[CameraController] SetModeAsync: Setting up Local mode...");
-                StartVisionPipelineLocal();
-                // StopCameraFeedAsync already cleaned up remote connections
+                StartVisionPipelineLocal(); // Placeholder
+                // StopCameraFeedAsync already cleaned up remote connections and timer
             }
         }
 
@@ -274,15 +215,9 @@ namespace RobotAIArm.Controllers
         // Core connection logic, starts loops, handles retries
         private async Task ConnectToPiServerAsync()
         {
-            // Ensure settings are loaded correctly
             Console.WriteLine("[ConnectToPiServerAsync] Method Entered.");
-
             string serverIp = AppSettings.Instance.RemoteIP;
-            if (string.IsNullOrEmpty(serverIp))
-            {
-                Console.WriteLine("[Connect Error] Remote IP is not set in AppSettings.");
-                return;
-            }
+            if (string.IsNullOrEmpty(serverIp)) { /* ... error handling ... */ return; }
             string pythonIp = "127.0.0.1";
             int pythonPort = 34567;
             int cameraPort = 23456;
@@ -293,113 +228,213 @@ namespace RobotAIArm.Controllers
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
 
-            Console.WriteLine($"[Connect] Starting connection attempts to Pi ({serverIp}) and Vision ({pythonIp}:{pythonPort})...");
+            Console.WriteLine($"[Connect] Starting connection attempts cycle...");
 
             while (!token.IsCancellationRequested)
             {
-                TcpClient? tempVisionClient = null;
-                TcpClient? tempPiClient = null;
-                TcpClient? tempCommandClient = null;
-                bool connectedSuccessfully = false;
-
+                bool connectionAttemptSuccess = false; // Track if current attempt connected fully
                 try
                 {
-                    // --- Connect to Local Vision Script ---
-                    Console.WriteLine($"[Connect] Attempting -> Vision.py ({pythonIp}:{pythonPort})...");
-                    tempVisionClient = new TcpClient();
-                    await tempVisionClient.ConnectAsync(pythonIp, pythonPort, token);
-                    _visionClient = tempVisionClient; // Assign to class field on success
-                    visionStream = _visionClient.GetStream();
-                    Console.WriteLine("[Connect] -> Vision.py Connected!");
+                    // --- Connect to Vision.py, Pi Camera, Pi Command ---
+                    Console.WriteLine($"[Connect] Attempting -> Vision.py ..."); await ConnectVisionAsync(pythonIp, 34567, token);
+                    Console.WriteLine($"[Connect] Attempting -> Pi Camera ..."); await ConnectPiCameraAsync(serverIp, 23456, token);
+                    Console.WriteLine($"[Connect] Attempting -> Pi Command ..."); await ConnectPiCommandAsync(serverIp, 23457, token);
+                    connectionAttemptSuccess = true;
 
-                    // --- Connect to Raspberry Pi Camera Port ---
-                    Console.WriteLine($"[Connect] Attempting -> Pi Camera ({serverIp}:{cameraPort})...");
-                    tempPiClient = new TcpClient();
-                    await tempPiClient.ConnectAsync(serverIp, cameraPort, token);
-                    _client = tempPiClient; // Assign to class field on success
-                    _networkStream = _client.GetStream();
-                    Console.WriteLine("[Connect] -> Pi Camera Connected!");
-
-                    // --- Connect to Raspberry Pi Command Port ---
-                    Console.WriteLine($"[Connect] Attempting -> Pi Command ({serverIp}:{commandPort})...");
-                    tempCommandClient = new TcpClient();
-                    await tempCommandClient.ConnectAsync(serverIp, commandPort, token);
-                    _commandClient = tempCommandClient; // Assign to class field on success
-                    _commandStream = _commandClient.GetStream();
-                    _commandWriter = new StreamWriter(_commandStream, Encoding.UTF8) { AutoFlush = true };
-                    Console.WriteLine("[Connect] -> Pi Command Connected!");
-
-                    connectedSuccessfully = true; // All connections established
-
-                    // --- Start Producer and Consumer Loops Concurrently ---
+                    // --- Start Background Loops ---
                     Console.WriteLine("[Connect] Starting Receive and Processing loops...");
-                    Task receiveTask = ReceiveLoopAsync();      // Producer
-                    Task processingTask = ProcessingLoopAsync(token); // Consumer
+                    Task receiveTask = ReceiveLoopAsync(token);       // Task 1 (Producer)
+                    Task processingTask = ProcessingLoopAsync(token); // Task 2 & 3 Orchestrator (Consumer)
 
-                    // Wait for EITHER task to complete (indicates disconnection, error, or cancellation)
+                    // --- Start the UI Update Timer (Task 4 driver) ---
+                    StartUiUpdateTimer(26.0); // Target 26 FPS
+
+                    // Wait for EITHER loop task to complete
                     await Task.WhenAny(receiveTask, processingTask);
 
-                    Console.WriteLine("[Connect] A loop task has completed (disconnect/error/cancel).");
-                    // Exiting WhenAny means the session is over for this attempt.
-                    // StopCameraFeedAsync will be called below or by external cancellation.
-                    break; // Exit the while loop after a session ends
-
+                    Console.WriteLine("[Connect] A loop task has completed. Session ending.");
+                    StopUiUpdateTimer(); // Stop timer when loops end
                 }
                 catch (OperationCanceledException)
                 {
                     Console.WriteLine("[Connect] Operation cancelled during connection or loops.");
-                    break; // Exit while loop cleanly
+                    // The while loop condition will terminate it.
                 }
                 catch (Exception ex)
                 {
+                    // This catches errors during the *connection attempt phase*
                     Console.WriteLine($"[Connect] Connection attempt failed: {ex.GetType().Name} - {ex.Message}");
-                    // Clean up temporary clients from this failed attempt
-                    tempVisionClient?.Dispose();
-                    tempPiClient?.Dispose();
-                    tempCommandClient?.Dispose();
-
+                    // Cleanup is handled by the finally block below.
                     // If not cancelled, wait before retrying
                     if (!token.IsCancellationRequested)
                     {
                         Console.WriteLine("[Connect] Waiting 3 seconds before retry...");
-                        try { await Task.Delay(3000, token); } catch (OperationCanceledException) { break; } // Allow delay to be cancelled
+                        try { await Task.Delay(3000, token); }
+                        catch (OperationCanceledException) { /* Allow cancellation during delay */ }
                     }
                 }
                 finally
                 {
-                    // If connection was successful but WhenAny exited, ensure cleanup via StopCameraFeedAsync
-                    if (connectedSuccessfully)
+                    Console.WriteLine("[Connect] Cleaning up network resources for this attempt...");
+                    // Ensure network resources are cleaned up regardless of success or failure within the try block
+                    // This allows the loop to retry connecting.
+                    CleanupNetworkResources(); // Use the helper method
+
+                    // If the connection was successful but loops ended (not due to cancellation),
+                    // add a small delay before the automatic retry by the while loop.
+                    if (connectionAttemptSuccess && !token.IsCancellationRequested)
                     {
-                        Console.WriteLine("[Connect] Session ended. Triggering cleanup...");
-                        await StopCameraFeedAsync(); // Ensure cleanup after loops finish/fail
+                        Console.WriteLine("[Connect] Connection dropped. Waiting 3 seconds before automatic retry...");
+                        try { await Task.Delay(3000, token); } catch (OperationCanceledException) { }
                     }
                 }
-            } // End while connection loop
+            } // End while (!token.IsCancellationRequested)
 
-            Console.WriteLine("[Connect] Connection loop exited.");
-            // Final cleanup check, StopCameraFeedAsync should handle most cases
-            await StopCameraFeedAsync(); // Call stop explicitly if loop ends for any reason other than ongoing cancellation
+            Console.WriteLine("[Connect] Connection loop exited permanently (likely cancelled).");
+            // Final full cleanup is handled by DisposeAsync/Dispose
         }
 
+        private async Task ConnectVisionAsync(string ip, int port, CancellationToken token) { /*...*/ _visionClient = new TcpClient(); await _visionClient.ConnectAsync(ip, port, token); visionStream = _visionClient.GetStream(); Console.WriteLine("[Connect] -> Vision.py Connected!"); }
+        private async Task ConnectPiCameraAsync(string ip, int port, CancellationToken token) { /*...*/ _client = new TcpClient(); await _client.ConnectAsync(ip, port, token); _networkStream = _client.GetStream(); Console.WriteLine("[Connect] -> Pi Camera Connected!"); }
+        private async Task ConnectPiCommandAsync(string ip, int port, CancellationToken token) { /*...*/ _commandClient = new TcpClient(); await _commandClient.ConnectAsync(ip, port, token); _commandStream = _commandClient.GetStream(); _commandWriter = new StreamWriter(_commandStream, Encoding.UTF8) { AutoFlush = true }; Console.WriteLine("[Connect] -> Pi Command Connected!"); }
+
+        private void StartUiUpdateTimer(double targetFps)
+        {
+            StopUiUpdateTimer(); // Ensure no duplicates
+
+            if (targetFps <= 0) targetFps = 30.0; // Default/fallback FPS
+            double intervalMs = 1000.0 / targetFps;
+
+            _uiUpdateTimer = new DispatcherTimer(DispatcherPriority.Background); // Use Background priority for UI updates
+            _uiUpdateTimer.Interval = TimeSpan.FromMilliseconds(intervalMs);
+            _uiUpdateTimer.Tick += UiUpdateTimer_Tick;
+            _uiUpdateTimer.Start();
+            Console.WriteLine($"[CameraController] UI Update Timer started (Interval: {intervalMs:F2}ms, Target FPS: {targetFps}).");
+        }
+
+        private void UiUpdateTimer_Tick(object? sender, EventArgs e)
+        {
+            ProcessedData? dataToShow = null; // Will hold combined result
+            bool hadNewResult;
+
+            // Check if new combined results are available
+            lock (_latestResultLock)
+            {
+                hadNewResult = _newResultAvailable;
+                if (hadNewResult)
+                {
+                    dataToShow = _latestProcessedData; // Get reference to combined data
+                    _newResultAvailable = false;      // Reset flag
+                }
+                // Keep _latestProcessedData reference for potential next tick if no new data arrives
+            }
+
+            if (hadNewResult && dataToShow != null) // Update only if new data was processed
+            {
+                Console.WriteLine($"[UiUpdateTimer] Tick - Got New Data. Bitmap Present: {dataToShow.ProcessedBitmap != null}, Encoders: {(dataToShow.EncoderValues == null ? "NULL" : string.Join(",", dataToShow.EncoderValues))}");
+
+                // Update Camera Image
+                if (dataToShow.ProcessedBitmap != null && _cameraImage != null)
+                {
+                    _cameraImage.Source = dataToShow.ProcessedBitmap;
+                }
+
+                // Raise event for Encoders
+                if (dataToShow.EncoderValues != null)
+                {
+                    Console.WriteLine($"[UiUpdateTimer] Raising EncodersReceived event with: {string.Join(",", dataToShow.EncoderValues)}");
+                    SignalController.Instance.RaiseEncodersReceived(dataToShow.EncoderValues);
+                }
+                else
+                {
+                    // --- ADD LOGGING HERE ---
+                    Console.WriteLine($"[UiUpdateTimer] Skipping RaiseEncodersReceived (EncoderValues were NULL).");
+                    // -----------------------
+                }
+            }
+            // else: No new processed data since last tick, UI remains unchanged.
+        }
+        private void StopUiUpdateTimer()
+        {
+            if (_uiUpdateTimer != null)
+            {
+                _uiUpdateTimer.Stop();
+                _uiUpdateTimer.Tick -= UiUpdateTimer_Tick;
+                _uiUpdateTimer = null;
+                Console.WriteLine("[CameraController] UI Update Timer stopped.");
+                // Reset availability flag when timer stops
+                lock (_latestResultLock) { _newResultAvailable = false; }
+            }
+        }
+
+        
+        // --- NEW: Separate Image Processing Task ---
+        private async Task<Bitmap?> ProcessImageTaskAsync(byte[] jpegBytes, CancellationToken cancellationToken)
+        {
+            Bitmap? bitmap = null;
+            byte[]? processedJpeg = null;
+
+            // Ensure visionStream is valid before proceeding
+            var currentVisionStream = visionStream; // Capture instance variable
+            if (currentVisionStream == null || !currentVisionStream.CanWrite || !currentVisionStream.CanRead)
+            {
+                Console.WriteLine("[ProcessImageTaskAsync WARN] visionStream not available.");
+                return null;
+            }
+
+            try
+            {
+                // Send JPEG to Vision.py via visionStream
+                byte[] sizeBytes = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(jpegBytes.Length));
+                await currentVisionStream.WriteAsync(sizeBytes, 0, 4, cancellationToken);
+                await currentVisionStream.WriteAsync(jpegBytes, 0, jpegBytes.Length, cancellationToken);
+
+                // Receive processed JPEG size from visionStream
+                byte[] responseSize = new byte[4];
+                int r = await currentVisionStream.ReadAsync(responseSize, 0, 4, cancellationToken);
+                if (r == 0) throw new IOException("visionStream closed while reading size");
+                if (r != 4) throw new IOException("Failed to read processed JPEG size fully");
+                int processedSize = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(responseSize, 0));
+                if (processedSize <= 0 || processedSize > 10_000_000) throw new IOException($"Invalid processed JPEG size: {processedSize}");
+
+                // Read processed JPEG bytes from visionStream
+                processedJpeg = new byte[processedSize];
+                int totalRead = 0;
+                while (totalRead < processedSize)
+                {
+                    int chunk = await currentVisionStream.ReadAsync(processedJpeg, totalRead, processedSize - totalRead, cancellationToken);
+                    if (chunk == 0) throw new IOException("visionStream closed during processed JPEG read");
+                    totalRead += chunk;
+                }
+
+                // Create Bitmap
+                using var ms = new MemoryStream(processedJpeg);
+                bitmap = new Bitmap(ms);
+                return bitmap; // Return the created bitmap
+            }
+            catch (OperationCanceledException) { Console.WriteLine("[ProcessImageTaskAsync] Cancelled."); return null; } // Propagate cancellation
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ProcessImageTaskAsync ERROR] {ex.GetType().Name}: {ex.Message}");
+                return null; // Return null on error
+            }
+        }
 
         // --- ReceiveLoopAsync (Producer) ---
-        private async Task ReceiveLoopAsync()
+        private async Task ReceiveLoopAsync(CancellationToken token)
         {
-            if (_networkStream == null || _cts == null)
-            {
-                Console.WriteLine("[ReceiveLoop Error] Stream or CancellationTokenSource is null.");
-                return;
-            }
-            var token = _cts.Token; // Get token at start
-            Console.WriteLine("[ReceiveLoop] Starting...");
+            if (_networkStream == null || _cts == null) { /* ... null check log ... */ return; }
+            Console.WriteLine("[ReceiveLoop] Starting (Minimal Version)...");
             try
             {
                 while (!token.IsCancellationRequested)
                 {
                     byte[]? jpegBytes = null;
+                    int[]? encoderValues = null; // Parsed values
+
                     try
                     {
-                        // Step 1: Read frame from the source (Pi Camera)
+                        // Step 1: Read frame (Keep existing logic)
                         byte[] sizeBuffer = new byte[4];
                         int read = await _networkStream.ReadAsync(sizeBuffer, 0, 4, token);
                         if (read == 0) { Console.WriteLine("[ReceiveLoop] Server closed connection (read size 0)."); break; }
@@ -417,110 +452,131 @@ namespace RobotAIArm.Controllers
                             bytesRead += chunk;
                         }
 
-                        // Step 2: Extract label and raw JPEG
+                        // --- Extract label and JPEG ---
                         int splitIndex = Array.IndexOf(packetBuffer, (byte)'\n');
                         if (splitIndex == -1) throw new FormatException("Invalid packet format (no newline)");
-
                         string label = Encoding.UTF8.GetString(packetBuffer, 0, splitIndex);
-                        Console.WriteLine($"[ENCODERS] {label}"); // Log received label
+                        jpegBytes = packetBuffer.AsSpan(splitIndex + 1).ToArray();
 
-                        jpegBytes = packetBuffer.AsSpan(splitIndex + 1).ToArray(); // Use AsSpan for efficiency
-                    }
-                    catch (OperationCanceledException) { Console.WriteLine("[ReceiveLoop] Cancellation requested during read."); break; }
-                    catch (IOException ioEx) { Console.WriteLine($"[ReceiveLoop IO ERROR] {ioEx.Message}"); break; } // Exit loop on socket read errors
-                    catch (FormatException formatEx) { Console.WriteLine($"[ReceiveLoop PACKET FORMAT ERROR] {formatEx.Message}"); continue; } // Log format error, try next packet
-                    catch (Exception ex) { Console.WriteLine($"[ReceiveLoop PACKET ERROR] {ex.GetType().Name}: {ex.Message}"); continue; } // Log other errors, try next packet
 
-                    // Step 2.5: Add successfully extracted JPEG data to the processing channel
-                    if (jpegBytes != null)
-                    {
-                        bool success = _processingChannel.Writer.TryWrite(jpegBytes);
-                        if (!success)
+                        // --- Parse Encoders (if present) ---
+                        if (label.StartsWith("ENCODERS:"))
                         {
-                            Console.WriteLine("[ReceiveLoop WARNING] Processing channel full, frame dropped.");
+                            // ... (Parsing logic as before) ...
+                            string valueString = label.Substring("ENCODERS:".Length);
+                            string[] parts = valueString.Split(',');
+                            if (parts.Length == 4) {
+                                encoderValues = new int[4];
+
+                                bool parseSuccess = true;
+
+                                for (int i = 0; i < 4; i++) { if (!int.TryParse(parts[i].Trim(), out encoderValues[i])) { parseSuccess = false; break; } }
+
+                                if (!parseSuccess) encoderValues = null;
+                            } else { encoderValues = null; }
                         }
+
+                        // --- Trigger processing task (fire-and-forget style) ---
+                        // Pass the parsed data directly to the processing method
+                        // We don't await ProcessPacketAsync here, otherwise ReceiveLoop
+                        // would block until processing finishes. We want receive to
+                        // keep reading while processing happens in the background.
+                        // Note: Error handling within ProcessPacketAsync is important.
+                        // Note: This could potentially start MANY tasks if processing is slow
+                        //       and packets arrive fast. A Channel might be better to buffer.
+                        if (jpegBytes != null)
+                        {
+                            var packet = new FrameDataPacket(jpegBytes, encoderValues);
+                            // Use WriteAsync for better backpressure handling if needed, or TryWrite
+                            await _processingChannel.Writer.WriteAsync(packet, token);
+                            // bool success = _processingChannel.Writer.TryWrite(packet);
+                            // if (!success) { /* Log dropped packet */ }
+                        }
+
                     }
-                } // End while loop
+                    catch (OperationCanceledException) { break; }
+                    catch (IOException ioEx) { Console.WriteLine($"[ReceiveLoop IO ERROR] {ioEx.Message}"); break; }
+                    catch (Exception ex) { /* ... log, continue ... */ Console.WriteLine($"[ReceiveLoop PACKET ERROR] {ex.Message}"); continue; }
+
+                    // --- REMOVED Channel writing ---
+
+                } // End while
             }
             finally
             {
                 Console.WriteLine("[ReceiveLoop] Exiting loop.");
-                // Don't close streams here, let StopCameraFeedAsync handle it
-                _processingChannel.Writer.TryComplete(); // Signal that this producer is done
+                // --- REMOVED Channel completion ---
             }
             Console.WriteLine("[ReceiveLoop] Ended.");
         }
 
-        // --- ProcessingLoopAsync (Consumer) ---
         private async Task ProcessingLoopAsync(CancellationToken cancellationToken)
         {
-            if (visionStream == null)
-            {
-                Console.WriteLine("[ProcessingLoop Error] visionStream is null.");
-                return; // Cannot proceed without the vision stream
-            }
-            Console.WriteLine("[ProcessingLoop] Starting...");
+            Console.WriteLine("[ProcessingLoop] Starting (Orchestrates Image/Encoder Tasks)...");
             try
             {
-                await foreach (byte[] jpegBytes in _processingChannel.Reader.ReadAllAsync(cancellationToken))
+                await foreach (FrameDataPacket packet in _processingChannel.Reader.ReadAllAsync(cancellationToken))
                 {
-                    if (visionStream == null || !visionStream.CanWrite || !visionStream.CanRead)
+                    if (cancellationToken.IsCancellationRequested) break;
+
+                    // --- Start parallel processing ---
+                    Task<Bitmap?> imageProcessingTask = ProcessImageTaskAsync(packet.JpegBytes, cancellationToken); // Task 2
+                    Task<int[]?> encoderProcessingTask = ProcessEncoderTaskAsync(packet.EncoderValues, cancellationToken); // Task 3 (Trivial)
+
+                    // --- Wait for both ---
+                    try
                     {
-                        Console.WriteLine("[ProcessingLoop WARN] visionStream is not available or closed. Skipping frame.");
-                        continue; // Skip if vision stream disconnected
+                        await Task.WhenAll(imageProcessingTask, encoderProcessingTask);
                     }
+                    catch (OperationCanceledException) { imageProcessingTask.Result?.Dispose(); break; } // Cleanup on cancel
+                    catch (Exception ex) { Console.WriteLine($"[ProcessingLoop] Error awaiting tasks: {ex.Message}"); imageProcessingTask.Result?.Dispose(); continue; } // Log and continue
 
-                    try // Process each frame individually
+                    // --- Get results ---
+                    Bitmap? processedBitmap = imageProcessingTask.Result; // Task completed, get result
+                    int[]? finalEncoderValues = encoderProcessingTask.Result;
+
+                    // --- Store the latest COMBINED results ---
+                    // Only store if image processing was successful, as that's the main driver
+                    if (processedBitmap != null)
                     {
-                        //Console.WriteLine($"[ProcessingLoop] Processing frame (size: {jpegBytes.Length}).");
+                        Console.WriteLine($"[ProcessingLoop] Storing Bitmap (NotNull) with Encoders: {(finalEncoderValues == null ? "NULL" : string.Join(",", finalEncoderValues))}");
 
-                        // Step 3: Send JPEG to Vision.py via visionStream
-                        byte[] sizeBytes = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(jpegBytes.Length));
-                        await visionStream.WriteAsync(sizeBytes, 0, 4, cancellationToken);
-                        await visionStream.WriteAsync(jpegBytes, 0, jpegBytes.Length, cancellationToken);
-
-                        // Step 4: Receive processed JPEG size from visionStream
-                        byte[] responseSize = new byte[4];
-                        int r = await visionStream.ReadAsync(responseSize, 0, 4, cancellationToken);
-                        if (r == 0) throw new IOException("visionStream closed while reading size");
-                        if (r != 4) throw new IOException("Failed to read processed JPEG size fully");
-
-                        int processedSize = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(responseSize, 0));
-                        if (processedSize <= 0 || processedSize > 10_000_000) throw new IOException($"Invalid processed JPEG size: {processedSize}");
-
-                        // Step 5: Read processed JPEG bytes from visionStream
-                        byte[] processedJpeg = new byte[processedSize];
-                        int totalRead = 0;
-                        while (totalRead < processedSize)
+                        lock (_latestResultLock)
                         {
-                            int chunk = await visionStream.ReadAsync(processedJpeg, totalRead, processedSize - totalRead, cancellationToken);
-                            if (chunk == 0) throw new IOException("visionStream closed during processed JPEG read");
-                            totalRead += chunk;
+                            var combinedResult = new ProcessedData(processedBitmap, finalEncoderValues);
+
+                            // Dispose previous results before overwriting
+                            _latestProcessedData?.ProcessedBitmap?.Dispose(); // Dispose previous bitmap if any
+
+                            _latestProcessedData = combinedResult; // Store new combined result
+                            _newResultAvailable = true;          // Signal the timer
                         }
-
-                        // Step 6: Display the processed JPEG
-                        using var ms = new MemoryStream(processedJpeg);
-                        var bitmap = new Bitmap(ms); // Decode JPEG
-
-                        // Update UI on the UI thread
-                        await Dispatcher.UIThread.InvokeAsync(() =>
-                        {
-                            _cameraImage.Source = bitmap;
-                        });
                     }
-                    catch (OperationCanceledException) { Console.WriteLine("[ProcessingLoop] Cancellation requested during frame processing."); break; }
-                    catch (IOException ioEx) { Console.WriteLine($"[ProcessingLoop VISION STREAM ERROR] {ioEx.Message}"); break; } // Assume visionStream connection is lost, exit loop
-                    catch (Exception ex) { Console.WriteLine($"[ProcessingLoop FRAME ERROR] {ex.GetType().Name}: {ex.Message}"); } // Log other errors, continue loop
-                } // End foreach loop
+                    else
+                    {
+                        processedBitmap?.Dispose(); // Ensure disposal if task returned non-null but we don't store it
+                    }
+                }
             }
-            catch (OperationCanceledException) { Console.WriteLine("[ProcessingLoop] Cancellation requested while waiting for channel items."); }
-            catch (ChannelClosedException) { Console.WriteLine("[ProcessingLoop] Processing channel was closed."); } // Handle channel closing gracefully
-            catch (Exception ex) { Console.WriteLine($"[ProcessingLoop UNEXPECTED ERROR] {ex.Message}"); } // Catch unexpected errors in the await foreach
-            finally { Console.WriteLine("[ProcessingLoop] Exiting loop."); }
+            catch (OperationCanceledException) { Console.WriteLine("[ProcessingLoop] Cancelled."); }
+            catch (ChannelClosedException) { Console.WriteLine("[ProcessingLoop] Channel closed."); }
+            catch (Exception ex) { Console.WriteLine($"[ProcessingLoop] Outer error: {ex.Message}"); }
+            finally
+            {
+                Console.WriteLine("[ProcessingLoop] Exiting loop.");
+                // Dispose final stored data on exit
+                lock (_latestResultLock) { _latestProcessedData?.ProcessedBitmap?.Dispose(); _latestProcessedData = null; }
+            }
             Console.WriteLine("[ProcessingLoop] Ended.");
         }
-
-        // --- Send Command ---
+        
+        //// --- Send Command ---
+        private async Task<int[]?> ProcessEncoderTaskAsync(int[]? encoderValues, CancellationToken cancellationToken)
+        {
+            // If there was CPU-intensive work needed on encoders, it would go here
+            // await Task.Delay(1, cancellationToken); // Simulate tiny work if needed
+            return await Task.FromResult(encoderValues); // Efficiently return existing value
+        }
         public async Task SendArduinoCommandAsync(string command)
         {
             if (_commandWriter != null)
@@ -568,6 +624,31 @@ namespace RobotAIArm.Controllers
 
                 Console.WriteLine("[DisposeAsyncCore] Async cleanup finished.");
             }
+        }
+
+
+
+        private void CleanupNetworkResources()
+        {
+            Console.WriteLine("[CleanupNetworkResources] Closing network streams and clients...");
+            // Use try-catch for each disposal to prevent one failure stopping others
+            try { _commandWriter?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] CommandWriter: {ex.Message}"); }
+            _commandWriter = null;
+            try { _commandStream?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] CommandStream: {ex.Message}"); }
+            _commandStream = null;
+            try { _commandClient?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] CommandClient: {ex.Message}"); }
+            _commandClient = null;
+
+            try { _networkStream?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] NetworkStream (Pi Camera): {ex.Message}"); }
+            _networkStream = null;
+            try { _client?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] Client (Pi Camera): {ex.Message}"); }
+            _client = null;
+
+            try { visionStream?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] VisionStream: {ex.Message}"); }
+            visionStream = null;
+            try { _visionClient?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] VisionClient: {ex.Message}"); }
+            _visionClient = null;
+            Console.WriteLine("[CleanupNetworkResources] Network cleanup finished.");
         }
 
         // Standard Dispose pattern (sync)
