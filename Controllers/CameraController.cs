@@ -50,6 +50,8 @@ namespace RobotAIArm.Controllers
         private ProcessedData? _latestProcessedData = null; // Stores combined result
         private bool _newResultAvailable = false;          // Flag for the timer
         private DispatcherTimer? _uiUpdateTimer;           // Timer for UI updates
+                                                           // In CameraController class fields:
+        private Bitmap? _bitmapCurrentlyDisplayed = null; // Track bitmap assigned to UI
 
         public CameraController(Image cameraImage, ArduinoController arduino)
         {
@@ -117,6 +119,7 @@ namespace RobotAIArm.Controllers
                 Console.WriteLine($"[CameraController] Error during full stop: {ex.Message}");
             }
         }
+        
         public async Task SetModeAsync(bool isRemote)
         {
             Console.WriteLine($"[CameraController] SetModeAsync called. Remote={isRemote}");
@@ -314,29 +317,39 @@ namespace RobotAIArm.Controllers
 
         private void UiUpdateTimer_Tick(object? sender, EventArgs e)
         {
-            ProcessedData? dataToShow = null; // Will hold combined result
+            ProcessedData? dataToShow = null;
             bool hadNewResult;
 
-            // Check if new combined results are available
             lock (_latestResultLock)
             {
                 hadNewResult = _newResultAvailable;
                 if (hadNewResult)
                 {
-                    dataToShow = _latestProcessedData; // Get reference to combined data
-                    _newResultAvailable = false;      // Reset flag
+                    dataToShow = _latestProcessedData; // Get reference to latest *ProcessedData* object
+                    _newResultAvailable = false;
                 }
-                // Keep _latestProcessedData reference for potential next tick if no new data arrives
             }
 
-            if (hadNewResult && dataToShow != null) // Update only if new data was processed
+            if (hadNewResult && dataToShow != null)
             {
-                Console.WriteLine($"[UiUpdateTimer] Tick - Got New Data. Bitmap Present: {dataToShow.ProcessedBitmap != null}, Encoders: {(dataToShow.EncoderValues == null ? "NULL" : string.Join(",", dataToShow.EncoderValues))}");
+                Bitmap? newBitmapToDisplay = dataToShow.ProcessedBitmap; // Get the bitmap reference from the data
 
                 // Update Camera Image
-                if (dataToShow.ProcessedBitmap != null && _cameraImage != null)
+                if (newBitmapToDisplay != null && _cameraImage != null)
                 {
-                    _cameraImage.Source = dataToShow.ProcessedBitmap;
+                    // --- Add Disposal Logic ---
+                    var previouslyDisplayedBitmap = _bitmapCurrentlyDisplayed; // Get bitmap currently shown
+                    _cameraImage.Source = newBitmapToDisplay; // Assign the NEW bitmap to the UI
+                    _bitmapCurrentlyDisplayed = newBitmapToDisplay; // Track the NEWLY assigned bitmap
+
+                    // Dispose the PREVIOUSLY displayed bitmap AFTER assigning the new one
+                    if (previouslyDisplayedBitmap != null && !ReferenceEquals(previouslyDisplayedBitmap, newBitmapToDisplay))
+                    {
+                        // Dispose previous bitmap if it's different from the new one
+                        Console.WriteLine($"[UiUpdateTimer] Disposing previous bitmap."); // Optional log
+                        previouslyDisplayedBitmap.Dispose();
+                    }
+                    // --- End Disposal Logic ---
                 }
 
                 // Raise event for Encoders
@@ -438,8 +451,16 @@ namespace RobotAIArm.Controllers
                         byte[] sizeBuffer = new byte[4];
                         int read = await _networkStream.ReadAsync(sizeBuffer, 0, 4, token);
                         if (read == 0) { Console.WriteLine("[ReceiveLoop] Server closed connection (read size 0)."); break; }
-                        if (read != 4) throw new IOException("Failed to read packet size header fully.");
-
+                        if (read != 4)
+                        {
+                            // Instead of throwing, log and skip to the next loop iteration
+                            Console.WriteLine($"[ReceiveLoop WARN] Failed to read packet size header fully (read {read}/4 bytes). Skipping packet.");
+                            // Attempt to clear the read buffer slightly? Optional, might help resync.
+                            await Task.Delay(10, token); // Small delay
+                            byte[] discardBuffer = new byte[1024];
+                            while (_networkStream.DataAvailable) { await _networkStream.ReadAsync(discardBuffer, 0, discardBuffer.Length, token); }
+                            continue; // Go to the next iteration of the while loop
+                        }
                         int packetSize = BitConverter.ToInt32(sizeBuffer.Reverse().ToArray(), 0);
                         if (packetSize <= 0 || packetSize > 50_000_000) throw new IOException($"Invalid packet size: {packetSize}");
 
@@ -457,6 +478,7 @@ namespace RobotAIArm.Controllers
                         if (splitIndex == -1) throw new FormatException("Invalid packet format (no newline)");
                         string label = Encoding.UTF8.GetString(packetBuffer, 0, splitIndex);
                         jpegBytes = packetBuffer.AsSpan(splitIndex + 1).ToArray();
+                        Console.WriteLine($"{label}");
 
 
                         // --- Parse Encoders (if present) ---
@@ -546,7 +568,6 @@ namespace RobotAIArm.Controllers
                             var combinedResult = new ProcessedData(processedBitmap, finalEncoderValues);
 
                             // Dispose previous results before overwriting
-                            _latestProcessedData?.ProcessedBitmap?.Dispose(); // Dispose previous bitmap if any
 
                             _latestProcessedData = combinedResult; // Store new combined result
                             _newResultAvailable = true;          // Signal the timer
@@ -680,6 +701,15 @@ namespace RobotAIArm.Controllers
                     // but most cleanup is handled by StopCameraFeedAsync called via DisposeAsyncCore.
                     Console.WriteLine("[Dispose] Managed resource disposal attempted.");
                 }
+
+                lock (_latestResultLock)
+                {
+                    _latestProcessedData?.ProcessedBitmap?.Dispose();
+                    _latestProcessedData = null;
+                    _bitmapCurrentlyDisplayed?.Dispose();
+                    _bitmapCurrentlyDisplayed = null;
+                }
+                Console.WriteLine("[Dispose] Final bitmaps disposed (sync path).");
 
                 // Cleanup unmanaged resources here if any (none in this class directly)
 

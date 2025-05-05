@@ -1,28 +1,35 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading; // Needed for DispatcherTimer and Dispatcher
+using CommunityToolkit.Mvvm.ComponentModel;
 using Dock.Model.Mvvm.Controls;
 using RobotAIArm.Controllers; // Assuming AppSettings and SignalController are accessible
 
 namespace RobotAIArm.ViewModels.Tools
 {
-    public class Tool2ViewModel : Tool // Consider implementing IDisposable
+    public partial class Tool2ViewModel : Tool // Consider implementing IDisposable
     {
         // --- Fields ---
         private MagneticEncoderController? _sensorController; // For local mode
 
-        private readonly List<string> angleLabels = new List<string>() {
-            "Base Angle:",
-            "Lower joint Angle:",
-            "Middle joint Angle:",
-            "Upper joint Angle:"
-        };
+        [ObservableProperty]
+        private int? _baseAngle; // Initialize to null (will show as empty initially)
 
-       
+        [ObservableProperty]
+        private int? _lowerJointAngle;
+
+        [ObservableProperty]
+        private int? _middleJointAngle;
+
+        [ObservableProperty]
+        private int? _upperJointAngle;
+
+
 
         // --- Properties ---
         public ObservableCollection<string> EncoderAngles { get; } = new ObservableCollection<string>();
@@ -52,51 +59,56 @@ namespace RobotAIArm.ViewModels.Tools
         }
 
         // This now ONLY stores the latest data, doesn't touch UI directly. Runs on background thread.
-        private async void OnEncodersReceived(int[] encoders) // Changed to async void
+        private void OnEncodersReceived(int[]? encoders) // Make parameter nullable for check
         {
-            // No longer storing locally - update UI immediately via dispatcher
-            // Runs on the background thread that raised the event.
+            // --- ADD THIS LOGGING ---
             Console.WriteLine($"[Tool2ViewModel.OnEncodersReceived] Handler Executed with: {(encoders == null ? "NULL" : string.Join(",", encoders))}");
+            // -----------------------
 
-            try
-            {
-                // Marshal the UI update logic to the UI thread.
-                
+            // --- Add Null Check ---
+            //if (encoders == null)
+            //{
+            //    Console.WriteLine("[Tool2ViewModel.OnEncodersReceived] Received null encoders.");
+            //    // Reset properties to null if desired
+            //    BaseAngle = null;
+            //    LowerJointAngle = null;
+            //    MiddleJointAngle = null;
+            //    UpperJointAngle = null;
+            //    return;
+            //}
+            // ---------------------
 
-                    if (encoders.Length == angleLabels.Count)
-                    {
-                        // Optimization: Update existing items instead of Clear/Add if counts match
-                        if (EncoderAngles.Count == encoders.Length)
-                        {
-                            for (int i = 0; i < encoders.Length; i++)
-                            {
-                                EncoderAngles[i] = $"{angleLabels[i]} {encoders[i]}";
-                            }
-                        }
-                        else // If count differs (e.g., first time), clear and add
-                        {
-                            EncoderAngles.Clear();
-                            for (int i = 0; i < encoders.Length; i++)
-                            {
-                                EncoderAngles.Add($"{angleLabels[i]} {encoders[i]}");
-                            }
-                        }
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[Tool2ViewModel WARN] Direct Update: Mismatched encoder count ({encoders.Length}).");
-                        EncoderAngles.Clear();
-                        EncoderAngles.Add("Error: Invalid encoder data");
-                    }
-                
-            }
-            catch (Exception ex)
-            {
-                // Exceptions in async void are harder to handle gracefully
-                Console.WriteLine($"[Tool2ViewModel] Error during direct UI update dispatch: {ex.Message}");
-            }
+            //try
+            //{
+                if (encoders.Length == 4) // Check if we have exactly 4 values
+                {
+                    // --- Update individual numeric properties ---
+                    BaseAngle = encoders[0];
+                    LowerJointAngle = encoders[1];
+                    MiddleJointAngle = encoders[2];
+                    UpperJointAngle = encoders[3];
+                    // --- End Update ---
+                }
+                else
+                {
+                    Console.WriteLine($"[Tool2ViewModel WARN] Received mismatched encoder count ({encoders.Length}). Expected 4");
+                    // Set properties to null or an error indicator if desired
+                    BaseAngle = null;
+                    LowerJointAngle = null;
+                    MiddleJointAngle = null;
+                    UpperJointAngle = null;
+                }
+            //}
+            //catch (Exception ex)
+            //{
+            //    Console.WriteLine($"[Tool2ViewModel.OnEncodersReceived] Error updating properties: {ex.Message}");
+            //    // Optionally set properties to null or an error state on exception
+            //    BaseAngle = null;
+            //    LowerJointAngle = null;
+            //    MiddleJointAngle = null;
+            //    UpperJointAngle = null;
+            //}
         }
-
 
         // This runs periodically on the UI thread via the timer
 
@@ -105,93 +117,75 @@ namespace RobotAIArm.ViewModels.Tools
         {
             Console.WriteLine($"[Tool2ViewModel] UpdateSubscriptionBasedOnMode called with isRemote={isRemote}.");
 
-            // Unsubscribe from SignalController event FIRST
-            SignalController.Instance.EncodersReceived -= OnEncodersReceived;
-            Console.WriteLine("[Tool2ViewModel] Unsubscribed from EncodersReceived.");
+            SignalController.Instance.EncodersReceived -= OnEncodersReceived; // Unsubscribe first
+            StopLocalEncoderReading(); // Stop local if running
 
-            // Stop local reading loop if it was running
-            StopLocalEncoderReading();
-
-            // --- Timer stop logic REMOVED ---
-            // _updateTimer.Stop();
-            // Console.WriteLine("[Tool2ViewModel] UI Update Timer stopped.");
-
-            // --- Local value clearing REMOVED (no longer storing locally) ---
-            // lock (_lockObject) { _latestEncoderValues = null; }
+            // Reset properties on mode change
+            BaseAngle = null;
+            LowerJointAngle = null;
+            MiddleJointAngle = null;
+            UpperJointAngle = null;
 
             if (isRemote)
             {
-                Console.WriteLine("[Tool2ViewModel] Setting up for remote mode (Direct UI Update).");
-                // Subscribe to remote signals
-                SignalController.Instance.EncodersReceived += OnEncodersReceived;
+                Console.WriteLine("[Tool2ViewModel] Setting up for remote mode.");
+                SignalController.Instance.EncodersReceived += OnEncodersReceived; // Subscribe
                 Console.WriteLine("[Tool2ViewModel] SUBSCRIBED to EncodersReceived.");
                 _sensorController = null;
-                // --- Timer start logic REMOVED ---
-                // _updateTimer.Start();
-                // Console.WriteLine("[Tool2ViewModel] UI Update Timer started.");
+                // Properties already reset above
             }
             else
             {
                 Console.WriteLine("[Tool2ViewModel] Setting up for local mode.");
+                // Properties already reset above
                 StartLocalEncoderReading(); // Start local reading
             }
-
-            // Clear UI on mode change & provide feedback
-            EncoderAngles.Clear();
-            EncoderAngles.Add($"Mode set to {(isRemote ? "Remote" : "Local")} - Waiting...");
         }
         // --- Local Mode Methods ---
         private CancellationTokenSource? _localReadCts;
 
         private void StartLocalEncoderReading()
         {
-            StopLocalEncoderReading(); // Ensure any previous loop is stopped
+            StopLocalEncoderReading();
             _localReadCts = new CancellationTokenSource();
             var token = _localReadCts.Token;
+            // Ensure controller is created only if needed and not already disposed
+            try
+            {
+                _sensorController ??= new MagneticEncoderController();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Tool2ViewModel] Failed to create MagneticEncoderController: {ex.Message}");
+                // Set properties to an error state?
+                BaseAngle = null; LowerJointAngle = null; MiddleJointAngle = null; UpperJointAngle = null;
+                return; // Don't start the task if controller failed
+            }
 
-            _sensorController ??= new MagneticEncoderController(); // Create if null
 
-            Task.Run(async () => { /* ... Same local loop as before ... */
+            Task.Run(async () => {
                 Console.WriteLine("[Tool2ViewModel] Local reading loop started.");
                 while (!token.IsCancellationRequested)
                 {
-                    try
-                    {
-                        // Use the existing local read method, which should handle its own UI updates via Dispatcher
-                        await ReadAndUpdateEncoderAnglesLocally(token);
-                        await Task.Delay(100, token); // Read local sensors periodically
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        Console.WriteLine("[Tool2ViewModel] Local reading loop cancelled.");
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[Tool2ViewModel] Error in local reading loop: {ex.Message}");
-                        await Task.Delay(1000, token);
-                    }
+                    try { await ReadAndUpdateEncoderAnglesLocally(token); await Task.Delay(100, token); }
+                    catch (OperationCanceledException) { Console.WriteLine("[Tool2ViewModel] Local reading loop cancelled."); break; }
+                    catch (Exception ex) { Console.WriteLine($"[Tool2ViewModel] Error in local reading loop: {ex.Message}"); await Task.Delay(1000, token); }
                 }
                 Console.WriteLine("[Tool2ViewModel] Local reading loop stopped.");
             }, token);
         }
-
         private void StopLocalEncoderReading()
         {
             if (_localReadCts != null)
             {
                 Console.WriteLine("[Tool2ViewModel] Stopping local reading loop...");
-                try
-                {
-                    _localReadCts.Cancel();
-                    _localReadCts.Dispose();
-                }
-                catch (ObjectDisposedException) { /* Ignore if already disposed */ }
+                try { _localReadCts.Cancel(); _localReadCts.Dispose(); }
+                catch (ObjectDisposedException) { /* Ignore */ }
                 _localReadCts = null;
             }
-            // Optional: Dispose sensor controller if it implements IDisposable and is only for local mode
-            // _sensorController?.Dispose();
-            // _sensorController = null;
+            // Dispose sensor controller if needed and it implements IDisposable
+            // (_sensorController as IDisposable)?.Dispose();
+            // _sensorController = null; // Maybe keep if needed again? Depends on lifecycle.
         }
 
         // Keep your existing local reading logic which updates UI via dispatcher
@@ -199,61 +193,69 @@ namespace RobotAIArm.ViewModels.Tools
         {
             if (_sensorController == null) return;
 
-            List<string> anglesList = new List<string>();
+            List<string> anglesListRaw = new List<string>();
+            int?[] parsedValues = new int?[4]; // Array to hold parsed int? values
+
             try
             {
-                anglesList.AddRange(_sensorController.ReadDataFromSensors()); // Assuming sync read
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Tool2ViewModel] Error reading local sensors: {ex.Message}");
-                await Dispatcher.UIThread.InvokeAsync(() => {
-                    EncoderAngles.Clear();
-                    EncoderAngles.Add("Error reading sensors");
-                }, DispatcherPriority.Normal, token);
-                return;
-            }
+                // Assuming ReadDataFromSensors returns a List<string> of the numeric values
+                anglesListRaw.AddRange(_sensorController.ReadDataFromSensors());
 
-            // Update the ObservableCollection on the UI thread (already handled in local loop)
-            await Dispatcher.UIThread.InvokeAsync(() =>
-            {
-                if (anglesList.Count == angleLabels.Count)
+                if (anglesListRaw.Count == 4)
                 {
-                    // Apply same optimization here
-                    if (EncoderAngles.Count == anglesList.Count)
+                    for (int i = 0; i < 4; i++)
                     {
-                        for (int i = 0; i < anglesList.Count; i++)
+                        if (int.TryParse(anglesListRaw[i], NumberStyles.Any, CultureInfo.InvariantCulture, out int val))
                         {
-                            EncoderAngles[i] = $"{angleLabels[i]} {anglesList[i]}"; // Assuming local returns values
+                            parsedValues[i] = val;
                         }
-                    }
-                    else
-                    {
-                        EncoderAngles.Clear();
-                        for (int i = 0; i < anglesList.Count; i++)
+                        else
                         {
-                            EncoderAngles.Add($"{angleLabels[i]} {anglesList[i]}");
+                            parsedValues[i] = null; // Parsing failed
+                            Console.WriteLine($"[Tool2ViewModel WARN] Local read parse failed for value: {anglesListRaw[i]}");
                         }
                     }
                 }
                 else
                 {
-                    Console.WriteLine($"[Tool2ViewModel WARN] Local read returned {anglesList.Count} values, expected {angleLabels.Count}.");
-                    EncoderAngles.Clear();
-                    EncoderAngles.Add("Error: Mismatched local sensor data");
+                    Console.WriteLine($"[Tool2ViewModel WARN] Local read returned {anglesListRaw.Count} values, expected 4.");
+                    // Leave parsedValues as nulls
                 }
-            }, DispatcherPriority.Normal, token); // Pass token
-        }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Tool2ViewModel] Error reading/parsing local sensors: {ex.Message}");
+                // Update properties to show error state on UI thread
+                if (token.IsCancellationRequested) return;
+                await Dispatcher.UIThread.InvokeAsync(() => {
+                    BaseAngle = null; LowerJointAngle = null; MiddleJointAngle = null; UpperJointAngle = null;
+                }, DispatcherPriority.Normal, token);
+                return;
+            }
 
+            // Update properties on the UI thread
+            if (token.IsCancellationRequested) return;
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                // Update individual properties using the parsed values
+                BaseAngle = parsedValues[0];
+                LowerJointAngle = parsedValues[1];
+                MiddleJointAngle = parsedValues[2];
+                UpperJointAngle = parsedValues[3];
+
+            }, DispatcherPriority.Normal, token);
+        }
 
         // --- Cleanup ---
         public void Cleanup() // Or implement IDisposable.Dispose
         {
             Console.WriteLine("[Tool2ViewModel] Cleaning up...");
-            
             AppSettings.Instance.PropertyChanged -= AppSettings_PropertyChanged;
             SignalController.Instance.EncodersReceived -= OnEncodersReceived;
             StopLocalEncoderReading();
+            // Dispose sensor controller if needed
+            // (_sensorController as IDisposable)?.Dispose();
         }
     }
 }

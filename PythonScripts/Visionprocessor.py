@@ -33,8 +33,8 @@ while True:
     # --- Receive frame from app ---
     size_data = client.recv(4)
     if len(size_data) < 4:
-        print("[Vision.py] Connection closed")
-        break
+        print("[Vision.py] size data below 4")
+        continue
 
     packet_size = struct.unpack('>I', size_data)[0]
     frame_data = b""
