@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing.Imaging;
 using System.IO;
@@ -10,6 +11,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection.Emit;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -18,8 +21,25 @@ namespace RobotAIArm.Controllers
 {
     // Implement IAsyncDisposable for proper async cleanup
     internal record FrameDataPacket(byte[] JpegBytes, int[]? EncoderValues);
-    internal record ProcessedData(Bitmap? ProcessedBitmap, int[]? EncoderValues);
+    // --- NEW: Structure for a single detection result ---
+    public class DetectionResult
+    {
+        [JsonPropertyName("label")] // Maps to Python's "label"
+        public string Label { get; set; } = "";
 
+        [JsonPropertyName("confidence")] // Maps to Python's "confidence"
+        public float Confidence { get; set; }
+
+        [JsonPropertyName("box")] // Maps to Python's "box"
+        public List<int> Box { get; set; } = new List<int>(); // x1, y1, x2, y2
+    }
+
+    // --- Updated: ProcessedData to include detections ---
+    internal record ProcessedData(
+        Bitmap? ProcessedBitmap,
+        int[]? EncoderValues,
+        List<DetectionResult>? Detections // List of detection results
+    );
 
     public class CameraController : IDisposable, IAsyncDisposable
     {
@@ -325,47 +345,40 @@ namespace RobotAIArm.Controllers
                 hadNewResult = _newResultAvailable;
                 if (hadNewResult)
                 {
-                    dataToShow = _latestProcessedData; // Get reference to latest *ProcessedData* object
+                    dataToShow = _latestProcessedData;
                     _newResultAvailable = false;
                 }
             }
 
             if (hadNewResult && dataToShow != null)
             {
-                Bitmap? newBitmapToDisplay = dataToShow.ProcessedBitmap; // Get the bitmap reference from the data
+                // Console.WriteLine($"[UiUpdateTimer] Tick - Got New Data. Bitmap: {dataToShow.ProcessedBitmap != null}, Encoders: {(dataToShow.EncoderValues == null ? "NULL" : "Present")}, Detections: {dataToShow.Detections?.Count ?? 0}");
 
                 // Update Camera Image
-                if (newBitmapToDisplay != null && _cameraImage != null)
+                if (dataToShow.ProcessedBitmap != null && _cameraImage != null)
                 {
-                    // --- Add Disposal Logic ---
-                    var previouslyDisplayedBitmap = _bitmapCurrentlyDisplayed; // Get bitmap currently shown
-                    _cameraImage.Source = newBitmapToDisplay; // Assign the NEW bitmap to the UI
-                    _bitmapCurrentlyDisplayed = newBitmapToDisplay; // Track the NEWLY assigned bitmap
+                    var previouslyDisplayedBitmap = _bitmapCurrentlyDisplayed;
+                    _cameraImage.Source = dataToShow.ProcessedBitmap; // Assign the NEW bitmap
+                    _bitmapCurrentlyDisplayed = dataToShow.ProcessedBitmap; // Track it
 
-                    // Dispose the PREVIOUSLY displayed bitmap AFTER assigning the new one
-                    if (previouslyDisplayedBitmap != null && !ReferenceEquals(previouslyDisplayedBitmap, newBitmapToDisplay))
+                    if (previouslyDisplayedBitmap != null && !ReferenceEquals(previouslyDisplayedBitmap, _bitmapCurrentlyDisplayed))
                     {
-                        // Dispose previous bitmap if it's different from the new one
-                        Console.WriteLine($"[UiUpdateTimer] Disposing previous bitmap."); // Optional log
                         previouslyDisplayedBitmap.Dispose();
                     }
-                    // --- End Disposal Logic ---
                 }
 
                 // Raise event for Encoders
                 if (dataToShow.EncoderValues != null)
                 {
-                    Console.WriteLine($"[UiUpdateTimer] Raising EncodersReceived event with: {string.Join(",", dataToShow.EncoderValues)}");
                     SignalController.Instance.RaiseEncodersReceived(dataToShow.EncoderValues);
                 }
-                else
+
+                // --- NEW: Raise event for Detections ---
+                if (dataToShow.Detections != null)
                 {
-                    // --- ADD LOGGING HERE ---
-                    Console.WriteLine($"[UiUpdateTimer] Skipping RaiseEncodersReceived (EncoderValues were NULL).");
-                    // -----------------------
+                    SignalController.Instance.RaiseDetectionsReceived(dataToShow.Detections); // Assuming this event exists
                 }
             }
-            // else: No new processed data since last tick, UI remains unchanged.
         }
         private void StopUiUpdateTimer()
         {
@@ -380,57 +393,78 @@ namespace RobotAIArm.Controllers
             }
         }
 
-        
+
         // --- NEW: Separate Image Processing Task ---
-        private async Task<Bitmap?> ProcessImageTaskAsync(byte[] jpegBytes, CancellationToken cancellationToken)
+        private async Task<(Bitmap? ProcessedBitmap, List<DetectionResult>? Detections)> ProcessImageTaskAsync(
+            byte[] jpegBytes, CancellationToken cancellationToken)
         {
             Bitmap? bitmap = null;
+            List<DetectionResult>? detections = null;
             byte[]? processedJpeg = null;
 
-            // Ensure visionStream is valid before proceeding
-            var currentVisionStream = visionStream; // Capture instance variable
+            var currentVisionStream = visionStream;
             if (currentVisionStream == null || !currentVisionStream.CanWrite || !currentVisionStream.CanRead)
             {
                 Console.WriteLine("[ProcessImageTaskAsync WARN] visionStream not available.");
-                return null;
+                return (null, null);
             }
 
             try
             {
-                // Send JPEG to Vision.py via visionStream
+                // 1. Send Raw JPEG
                 byte[] sizeBytes = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(jpegBytes.Length));
                 await currentVisionStream.WriteAsync(sizeBytes, 0, 4, cancellationToken);
                 await currentVisionStream.WriteAsync(jpegBytes, 0, jpegBytes.Length, cancellationToken);
 
-                // Receive processed JPEG size from visionStream
-                byte[] responseSize = new byte[4];
-                int r = await currentVisionStream.ReadAsync(responseSize, 0, 4, cancellationToken);
-                if (r == 0) throw new IOException("visionStream closed while reading size");
-                if (r != 4) throw new IOException("Failed to read processed JPEG size fully");
-                int processedSize = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(responseSize, 0));
-                if (processedSize <= 0 || processedSize > 10_000_000) throw new IOException($"Invalid processed JPEG size: {processedSize}");
+                // 2. Read JSON length
+                byte[] jsonLengthBytes = new byte[4];
+                int read = await currentVisionStream.ReadAsync(jsonLengthBytes, 0, 4, cancellationToken);
+                if (read != 4) throw new IOException("Failed to read JSON length fully.");
+                int jsonLength = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(jsonLengthBytes, 0));
+                if (jsonLength < 0 || jsonLength > 1_000_000) throw new IOException($"Invalid JSON data length: {jsonLength}");
 
-                // Read processed JPEG bytes from visionStream
-                processedJpeg = new byte[processedSize];
-                int totalRead = 0;
-                while (totalRead < processedSize)
+                if (jsonLength > 0)
                 {
-                    int chunk = await currentVisionStream.ReadAsync(processedJpeg, totalRead, processedSize - totalRead, cancellationToken);
-                    if (chunk == 0) throw new IOException("visionStream closed during processed JPEG read");
-                    totalRead += chunk;
+                    byte[] jsonBytes = new byte[jsonLength];
+                    int totalJsonRead = 0;
+                    while (totalJsonRead < jsonLength)
+                    {
+                        int chunk = await currentVisionStream.ReadAsync(jsonBytes, totalJsonRead, jsonLength - totalJsonRead, cancellationToken);
+                        if (chunk == 0) throw new IOException("visionStream closed during JSON data read.");
+                        totalJsonRead += chunk;
+                    }
+                    string jsonString = Encoding.UTF8.GetString(jsonBytes);
+                    detections = JsonSerializer.Deserialize<List<DetectionResult>>(jsonString);
                 }
+                else { detections = new List<DetectionResult>(); }
 
-                // Create Bitmap
-                using var ms = new MemoryStream(processedJpeg);
-                bitmap = new Bitmap(ms);
-                return bitmap; // Return the created bitmap
+                // 3. Read image length
+                byte[] imageLengthBytes = new byte[4];
+                read = await currentVisionStream.ReadAsync(imageLengthBytes, 0, 4, cancellationToken);
+                if (read != 4) throw new IOException("Failed to read processed image length fully.");
+                int processedImageLength = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(imageLengthBytes, 0));
+                if (processedImageLength < 0 || processedImageLength > 10_000_000) throw new IOException($"Invalid processed image length: {processedImageLength}");
+
+                if (processedImageLength > 0)
+                {
+                    processedJpeg = new byte[processedImageLength];
+                    int totalImageRead = 0;
+                    while (totalImageRead < processedImageLength)
+                    {
+                        int chunk = await currentVisionStream.ReadAsync(processedJpeg, totalImageRead, processedImageLength - totalImageRead, cancellationToken);
+                        if (chunk == 0) throw new IOException("visionStream closed during processed image read.");
+                        totalImageRead += chunk;
+                    }
+                    using var ms = new MemoryStream(processedJpeg);
+                    bitmap = new Bitmap(ms);
+                }
+                else { bitmap = null; }
+
+                return (bitmap, detections);
             }
-            catch (OperationCanceledException) { Console.WriteLine("[ProcessImageTaskAsync] Cancelled."); return null; } // Propagate cancellation
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ProcessImageTaskAsync ERROR] {ex.GetType().Name}: {ex.Message}");
-                return null; // Return null on error
-            }
+            catch (OperationCanceledException) { Console.WriteLine("[ProcessImageTaskAsync] Cancelled."); return (null, null); }
+            catch (JsonException jsonEx) { Console.WriteLine($"[ProcessImageTaskAsync JSON ERROR] {jsonEx.Message}"); return (null, detections); }
+            catch (Exception ex) { Console.WriteLine($"[ProcessImageTaskAsync ERROR] {ex.GetType().Name}: {ex.Message}"); return (null, null); }
         }
 
         // --- ReceiveLoopAsync (Producer) ---
@@ -478,7 +512,7 @@ namespace RobotAIArm.Controllers
                         if (splitIndex == -1) throw new FormatException("Invalid packet format (no newline)");
                         string label = Encoding.UTF8.GetString(packetBuffer, 0, splitIndex);
                         jpegBytes = packetBuffer.AsSpan(splitIndex + 1).ToArray();
-                        Console.WriteLine($"{label}");
+                        Console.WriteLine($"{jpegBytes}");
 
 
                         // --- Parse Encoders (if present) ---
@@ -534,63 +568,48 @@ namespace RobotAIArm.Controllers
 
         private async Task ProcessingLoopAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine("[ProcessingLoop] Starting (Orchestrates Image/Encoder Tasks)...");
+            Console.WriteLine("[ProcessingLoop] Starting (Orchestrates Image/Encoder/Detection Tasks)...");
             try
             {
                 await foreach (FrameDataPacket packet in _processingChannel.Reader.ReadAllAsync(cancellationToken))
                 {
                     if (cancellationToken.IsCancellationRequested) break;
 
-                    // --- Start parallel processing ---
-                    Task<Bitmap?> imageProcessingTask = ProcessImageTaskAsync(packet.JpegBytes, cancellationToken); // Task 2
-                    Task<int[]?> encoderProcessingTask = ProcessEncoderTaskAsync(packet.EncoderValues, cancellationToken); // Task 3 (Trivial)
+                    // ProcessImageTaskAsync now handles Python communication and returns bitmap + detections
+                    var imageProcessingResult = await ProcessImageTaskAsync(packet.JpegBytes, cancellationToken);
 
-                    // --- Wait for both ---
-                    try
+                    Bitmap? processedBitmap = imageProcessingResult.ProcessedBitmap;
+                    List<DetectionResult>? detections = imageProcessingResult.Detections;
+                    int[]? finalEncoderValues = packet.EncoderValues; // Encoders travelled with the packet
+
+                    if (processedBitmap != null || (detections != null && detections.Any())) // Store if we have a new bitmap OR new detections
                     {
-                        await Task.WhenAll(imageProcessingTask, encoderProcessingTask);
-                    }
-                    catch (OperationCanceledException) { imageProcessingTask.Result?.Dispose(); break; } // Cleanup on cancel
-                    catch (Exception ex) { Console.WriteLine($"[ProcessingLoop] Error awaiting tasks: {ex.Message}"); imageProcessingTask.Result?.Dispose(); continue; } // Log and continue
-
-                    // --- Get results ---
-                    Bitmap? processedBitmap = imageProcessingTask.Result; // Task completed, get result
-                    int[]? finalEncoderValues = encoderProcessingTask.Result;
-
-                    // --- Store the latest COMBINED results ---
-                    // Only store if image processing was successful, as that's the main driver
-                    if (processedBitmap != null)
-                    {
-                        Console.WriteLine($"[ProcessingLoop] Storing Bitmap (NotNull) with Encoders: {(finalEncoderValues == null ? "NULL" : string.Join(",", finalEncoderValues))}");
-
+                        // Console.WriteLine($"[ProcessingLoop] Storing Bitmap ({(processedBitmap != null ? "NotNull" : "NULL")}) with Encoders: {(finalEncoderValues == null ? "NULL" : string.Join(",", finalEncoderValues))} and Detections: {detections?.Count ?? 0}");
                         lock (_latestResultLock)
                         {
-                            var combinedResult = new ProcessedData(processedBitmap, finalEncoderValues);
+                            // Dispose previous bitmap BEFORE assigning new one
+                            _latestProcessedData?.ProcessedBitmap?.Dispose();
 
-                            // Dispose previous results before overwriting
-
-                            _latestProcessedData = combinedResult; // Store new combined result
-                            _newResultAvailable = true;          // Signal the timer
+                            _latestProcessedData = new ProcessedData(processedBitmap, finalEncoderValues, detections);
+                            _newResultAvailable = true;
                         }
                     }
                     else
                     {
-                        processedBitmap?.Dispose(); // Ensure disposal if task returned non-null but we don't store it
+                        // If image processing failed, ensure the returned (null) bitmap is handled (no-op if already null)
+                        processedBitmap?.Dispose(); // This will be null if processing failed
+                        Console.WriteLine("[ProcessingLoop] No new bitmap or detections to store.");
                     }
                 }
             }
-            catch (OperationCanceledException) { Console.WriteLine("[ProcessingLoop] Cancelled."); }
-            catch (ChannelClosedException) { Console.WriteLine("[ProcessingLoop] Channel closed."); }
-            catch (Exception ex) { Console.WriteLine($"[ProcessingLoop] Outer error: {ex.Message}"); }
+            // ... (Existing catch blocks for OperationCanceled, ChannelClosed, general Exception) ...
             finally
             {
                 Console.WriteLine("[ProcessingLoop] Exiting loop.");
-                // Dispose final stored data on exit
                 lock (_latestResultLock) { _latestProcessedData?.ProcessedBitmap?.Dispose(); _latestProcessedData = null; }
             }
             Console.WriteLine("[ProcessingLoop] Ended.");
         }
-        
         //// --- Send Command ---
         private async Task<int[]?> ProcessEncoderTaskAsync(int[]? encoderValues, CancellationToken cancellationToken)
         {
