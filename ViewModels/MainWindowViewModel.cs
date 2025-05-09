@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Dock.Model.Controls;
 using Dock.Model.Core;
+using RobotAIArm.Controllers;
 
 namespace RobotAIArm.ViewModels;
 
@@ -12,6 +13,7 @@ public class MainWindowViewModel : ObservableObject
 {
     private readonly IFactory? _factory;
     private IRootDock? _layout;
+    
 
     public IRootDock? Layout
     {
@@ -23,6 +25,7 @@ public class MainWindowViewModel : ObservableObject
 
     public MainWindowViewModel()
     {
+        
         _factory = new DockFactory(new DemoData());
 
         DebugFactoryEvents(_factory);

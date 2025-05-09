@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing.Imaging;
@@ -50,14 +51,18 @@ namespace RobotAIArm.Controllers
         private CancellationTokenSource? _cts;
         private bool _disposed = false;
 
+        
+        
+
+
+
         // --- Network Fields ---
         private TcpClient? _client;
         private NetworkStream? _networkStream;
         private TcpClient? _visionClient;
         private NetworkStream? visionStream;
-        private TcpClient? _commandClient;
-        private NetworkStream? _commandStream;
-        private StreamWriter? _commandWriter;
+        
+        
 
         // --- Channel for decoupling Receive from Processing ---
         private readonly Channel<FrameDataPacket> _processingChannel = Channel.CreateBounded<FrameDataPacket>(new BoundedChannelOptions(5) // Buffer size
@@ -72,11 +77,13 @@ namespace RobotAIArm.Controllers
         private DispatcherTimer? _uiUpdateTimer;           // Timer for UI updates
                                                            // In CameraController class fields:
         private Bitmap? _bitmapCurrentlyDisplayed = null; // Track bitmap assigned to UI
+        private RobotController? _robotController;
 
         public CameraController(Image cameraImage, ArduinoController arduino)
         {
             _cameraImage = cameraImage;
-            _arduino = arduino; 
+            _arduino = arduino;
+            new RobotController(arduino);
         }
 
         
@@ -138,8 +145,12 @@ namespace RobotAIArm.Controllers
             {
                 Console.WriteLine($"[CameraController] Error during full stop: {ex.Message}");
             }
+            //_arduino.StopArduinoThread(); // Ensure Arduino thread is stopped
+
         }
+
         
+
         public async Task SetModeAsync(bool isRemote)
         {
             Console.WriteLine($"[CameraController] SetModeAsync called. Remote={isRemote}");
@@ -150,7 +161,7 @@ namespace RobotAIArm.Controllers
             {
                 Console.WriteLine("[CameraController] SetModeAsync: Setting up Remote mode...");
                 StartVisionPipelineRemote();
-                // ConnectToPiServerAsync will be called, which starts loops and then the timer
+                _arduino.StartArduinoThread(); // Start Arduino thread if not already running
                 _ = ConnectToPiServerAsync(); // Fire-and-forget connection loop task
             }
             else
@@ -160,6 +171,8 @@ namespace RobotAIArm.Controllers
                 // StopCameraFeedAsync already cleaned up remote connections and timer
             }
         }
+
+        
 
         private void StartVisionPipelineLocal()
         {
@@ -261,7 +274,7 @@ namespace RobotAIArm.Controllers
                     // --- Connect to Vision.py, Pi Camera, Pi Command ---
                     Console.WriteLine($"[Connect] Attempting -> Vision.py ..."); await ConnectVisionAsync(pythonIp, 34567, token);
                     Console.WriteLine($"[Connect] Attempting -> Pi Camera ..."); await ConnectPiCameraAsync(serverIp, 23456, token);
-                    Console.WriteLine($"[Connect] Attempting -> Pi Command ..."); await ConnectPiCommandAsync(serverIp, 23457, token);
+                    //Console.WriteLine($"[Connect] Attempting -> Pi Command ..."); await ConnectPiCommandAsync(serverIp, 23457, token);
                     connectionAttemptSuccess = true;
 
                     // --- Start Background Loops ---
@@ -319,7 +332,7 @@ namespace RobotAIArm.Controllers
 
         private async Task ConnectVisionAsync(string ip, int port, CancellationToken token) { /*...*/ _visionClient = new TcpClient(); await _visionClient.ConnectAsync(ip, port, token); visionStream = _visionClient.GetStream(); Console.WriteLine("[Connect] -> Vision.py Connected!"); }
         private async Task ConnectPiCameraAsync(string ip, int port, CancellationToken token) { /*...*/ _client = new TcpClient(); await _client.ConnectAsync(ip, port, token); _networkStream = _client.GetStream(); Console.WriteLine("[Connect] -> Pi Camera Connected!"); }
-        private async Task ConnectPiCommandAsync(string ip, int port, CancellationToken token) { /*...*/ _commandClient = new TcpClient(); await _commandClient.ConnectAsync(ip, port, token); _commandStream = _commandClient.GetStream(); _commandWriter = new StreamWriter(_commandStream, Encoding.UTF8) { AutoFlush = true }; Console.WriteLine("[Connect] -> Pi Command Connected!"); }
+        //private async Task ConnectPiCommandAsync(string ip, int port, CancellationToken token) { /*...*/ _commandClient = new TcpClient(); await _commandClient.ConnectAsync(ip, port, token); _commandStream = _commandClient.GetStream(); _commandWriter = new StreamWriter(_commandStream, Encoding.UTF8) { AutoFlush = true }; Console.WriteLine("[Connect] -> Pi Command Connected!"); }
 
         private void StartUiUpdateTimer(double targetFps)
         {
@@ -617,26 +630,7 @@ namespace RobotAIArm.Controllers
             // await Task.Delay(1, cancellationToken); // Simulate tiny work if needed
             return await Task.FromResult(encoderValues); // Efficiently return existing value
         }
-        public async Task SendArduinoCommandAsync(string command)
-        {
-            if (_commandWriter != null)
-            {
-                try
-                {
-                    await _commandWriter.WriteLineAsync(command); // Send command directly
-                    //Console.WriteLine($"[COMMAND SENT] {command}"); // Optional log
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[COMMAND ERROR] Failed to send command '{command}': {ex.Message}");
-                    // Consider triggering a disconnect/reconnect?
-                }
-            }
-            else
-            {
-                Console.WriteLine($"[COMMAND WARN] Cannot send '{command}', not connected.");
-            }
-        }
+        
 
         // --- IDisposable and IAsyncDisposable Implementation ---
 
@@ -655,6 +649,8 @@ namespace RobotAIArm.Controllers
                 Console.WriteLine("[DisposeAsyncCore] Starting async cleanup...");
                 // Await the stop method which handles cancellation and resource cleanup
                 await StopCameraFeedAsync();
+                _arduino.StopArduinoThread(); // Ensure thread is stopped
+
 
                 // Unsubscribe from events
                 //if (SignalController.Instance != null)
@@ -672,12 +668,7 @@ namespace RobotAIArm.Controllers
         {
             Console.WriteLine("[CleanupNetworkResources] Closing network streams and clients...");
             // Use try-catch for each disposal to prevent one failure stopping others
-            try { _commandWriter?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] CommandWriter: {ex.Message}"); }
-            _commandWriter = null;
-            try { _commandStream?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] CommandStream: {ex.Message}"); }
-            _commandStream = null;
-            try { _commandClient?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] CommandClient: {ex.Message}"); }
-            _commandClient = null;
+           _arduino.CleanupArduinoResources();
 
             try { _networkStream?.Dispose(); } catch (Exception ex) { Console.WriteLine($"[Cleanup Error] NetworkStream (Pi Camera): {ex.Message}"); }
             _networkStream = null;
@@ -715,6 +706,8 @@ namespace RobotAIArm.Controllers
 
                     // Attempt to complete channel writer if not already done
                     _processingChannel.Writer.TryComplete();
+                    //_arduino.StopArduinoThread(); // Ensure thread is stopped
+
 
                     // Other strictly synchronous managed resource cleanup can go here,
                     // but most cleanup is handled by StopCameraFeedAsync called via DisposeAsyncCore.
