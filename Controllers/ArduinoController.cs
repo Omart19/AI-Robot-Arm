@@ -10,6 +10,7 @@ using System.Collections.ObjectModel;
 using System.Net.Sockets;
 using System.IO;
 using System.Collections.Concurrent;
+using System.Linq;
 
 namespace RobotAIArm.Controllers
 {
@@ -164,63 +165,53 @@ namespace RobotAIArm.Controllers
                     }
                 }
                 Console.WriteLine("[ArduinoThread] starting command loop.");
-                Thread.Sleep(10); // Small delay to prevent tight-looping
 
                 try
                 {
                     // --- Process Commands (Continuous Loop) ---
                     while (_arduinoThreadRunning) // Use the running flag as the main loop condition
                     {
-                        try
+
+                        string? command = null;
+                        //try
+                        //{
+                        if (_arduinoCommandQueue.Count >= 1)
                         {
-                            string? command = null;
-                            try
-                            {
+                            
+                                command = _arduinoCommandQueue.Last();
+                                _commandWriter.WriteLine(command); // Send command
 
-                                command = _arduinoCommandQueue.Take(); // Blocking: Waits for an item
-                            }
-                            catch (InvalidOperationException)
-                            {
-                                // Thrown when CompleteAdding is called and queue is empty
-                                Console.WriteLine("[ArduinoThread] Command queue is completing.");
-                                break; // Exit the loop
-                            }
+                            
 
-                            if (!string.IsNullOrEmpty(command))
-                            {
-                                try
-                                {
-                                    _commandWriter.WriteLine(command); // Send command
-                                    Console.WriteLine($"[ArduinoThread] Sent command: {command}");
-                                }
-                                catch (IOException ioEx)
-                                {
-                                    Console.WriteLine($"[ArduinoThread] IO Error sending command: {ioEx.Message}");
-                                    // Handle connection loss (e.g., attempt reconnect or exit)
-                                    break; // Exit inner loop to potentially reconnect
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"[ArduinoThread] Error sending command: {ex.Message}");
-                                    // Log, but continue processing
-                                }
-                            }
-
-                            Thread.Sleep(10); // Small delay to prevent tight-looping
                         }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[ArduinoThread] Unexpected error in command loop: {ex.Message}");
-                            break; // Exit inner loop on error
-                        }
+                        //catch (InvalidOperationException)
+                        //{
+                        //    // Thrown when CompleteAdding is called and queue is empty
+                        //    Console.WriteLine("[ArduinoThread] Command queue is completing.");
+                        //    break; // Exit the loop
+                        //}
+
+                        //if (!string.IsNullOrEmpty(command))
+                        //{
+
+                        //    _commandWriter.WriteLine(command); // Send command
+                        //    Console.WriteLine($"[ArduinoThread] Sent command: {command}");
+
+
+                        //}
+                        
+                        
+                        //_arduinoCommandQueue = new BlockingCollection<string>();
+                        ClearArduinoCommandQueue();
+                        Thread.Sleep(1); // Small delay to prevent tight-looping
 
                     }
                 }
-                catch(Exception ex) 
+                catch (Exception ex)
                 {
                     Console.WriteLine($"[ArduinoThread] Unexpected error starting command loop: {ex.Message}");
                 }
-                    
+
             }
             finally
             {
@@ -231,20 +222,35 @@ namespace RobotAIArm.Controllers
                 Console.WriteLine("[ArduinoThread] Arduino thread ended.");
             }
         }
+
+
+
         public void EnqueueArduinoCommand(string command)
         {
-            try 
+            try
             {
                 _arduinoCommandQueue.Add(command);
                 Console.WriteLine($"[CameraController] Enqueued command: {command}");
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 Console.WriteLine($"[CameraController] command not able to send {ex}.");
             }
+            //ClearArduinoCommandQueue();
+        }
+        public void ClearArduinoCommandQueue()
+        {
+            // Keep taking items from the queue until it's empty.
+            // The 'out _' (discard) is used because we don't need the value of the items being removed.
+            while (_arduinoCommandQueue.Count != 0)
+            {
+                _arduinoCommandQueue.Take();
+                // No action needed here, just consuming and discarding items.
+            }
+            Console.WriteLine("Arduino command queue has been emptied.");
         }
 
-        
+
         public async Task<bool> ConnectAsync()
         {
             if (AppSettings.Instance.IsRemoteMode)
