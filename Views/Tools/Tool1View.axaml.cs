@@ -12,6 +12,7 @@ namespace RobotAIArm.Views.Tools;
 public partial class Tool1View : UserControl
 {
     private CameraController? _cameraController;
+
     private ArduinoController _arduinoController = new ArduinoController();
     // private bool _cameraInitialized = false; // Can likely remove this flag now
 

@@ -1,5 +1,6 @@
 ﻿// SignalController.cs
 
+using RobotAIArm.ViewModels.Tools;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -21,16 +22,41 @@ namespace RobotAIArm.Controllers
         public static SignalController Instance => lazy.Value;
         private SignalController() { } // Private constructor
 
+        public event Action? RobotControllerReadyForHomingCheck;
+
+
         // --- Define Events ---
         public event Action<bool>? ModeChanged;
         public event Action<int[]>? EncodersReceived;
         public event Action<byte[]>? RawFrameReceived;       // Optional: If needed elsewhere
         public event Action<byte[]>? ProcessedFrameReceived; // Optional: If needed elsewhere
         public event Action<List<DetectionResult>?>? DetectionsReceived; // <<< NEW EVENT >>>
+        public event Action<int?, int?>? TofSensorsReceived;
 
+        /// <summary>
+        /// Raised by CameraController when remote connections are established and data flow is expected.
+        /// </summary>
+        public event Action? RemoteSystemReadyForActions;
 
+        /// <summary>
+        /// Event raised to request startup homing. Passes the Tool2ViewModel instance that determined this.
+        /// </summary>
+        public event Func<Tool2ViewModel, Task>? StartupHomingRequestedAsync;
         // --- Methods to Raise Events ---
         public void RaiseModeChanged(bool isRemote) => ModeChanged?.Invoke(isRemote);
+
+        public void RaiseRemoteSystemReadyForActions()
+        {
+            Console.WriteLine("[SignalController] Raising RemoteSystemReadyForActions event.");
+            RemoteSystemReadyForActions?.Invoke();
+        }
+
+        public void RaiseStartupHomingRequested(Tool2ViewModel tool2ViewModel)
+        {
+            Console.WriteLine("[SignalController] Raising StartupHomingRequestedAsync event.");
+            // Asynchronously invoke if there are subscribers
+            StartupHomingRequestedAsync?.Invoke(tool2ViewModel);
+        }
 
         // Inside SignalController.cs
         public void RaiseEncodersReceived(int[] encoderValues)
@@ -47,6 +73,18 @@ namespace RobotAIArm.Controllers
                 // ---> ADD LOGGING HERE <---
                 Console.WriteLine("[SignalController] No subscribers for EncodersReceived.");
             }
+        }
+
+        public void RaiseRobotControllerReadyForHomingCheck()
+        {
+            Console.WriteLine("[SignalController] Raising RobotControllerReadyForHomingCheck event.");
+            RobotControllerReadyForHomingCheck?.Invoke();
+        }
+
+        public void RaiseTofSensorsReceived(int? tofHand, int? tofCam)
+        {
+            Console.WriteLine($"[SignalController] Invoking TofSensorsReceived. Hand: {tofHand?.ToString() ?? "N/A"}, Cam: {tofCam?.ToString() ?? "N/A"}");
+            TofSensorsReceived?.Invoke(tofHand, tofCam);
         }
 
         public void RaiseDetectionsReceived(List<DetectionResult>? detections)

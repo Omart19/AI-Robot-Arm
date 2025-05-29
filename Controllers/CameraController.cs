@@ -21,7 +21,7 @@ using System.Threading.Tasks;
 namespace RobotAIArm.Controllers
 {
     // Implement IAsyncDisposable for proper async cleanup
-    internal record FrameDataPacket(byte[] JpegBytes, int[]? EncoderValues);
+    internal record FrameDataPacket(byte[] JpegBytes, int[]? EncoderValues, int? TofHand, int? TofCam);
     // --- NEW: Structure for a single detection result ---
     public class DetectionResult
     {
@@ -39,7 +39,9 @@ namespace RobotAIArm.Controllers
     internal record ProcessedData(
         Bitmap? ProcessedBitmap,
         int[]? EncoderValues,
-        List<DetectionResult>? Detections // List of detection results
+        List<DetectionResult>? Detections,
+    int? TofHandValue, // Added
+    int? TofCamValue
     );
 
     public class CameraController : IDisposable, IAsyncDisposable
@@ -285,6 +287,16 @@ namespace RobotAIArm.Controllers
                     // --- Start the UI Update Timer (Task 4 driver) ---
                     StartUiUpdateTimer(26.0); // Target 26 FPS
 
+                    if (_networkStream != null && _networkStream.CanRead) // Check if the stream is viable
+                    {
+                        Console.WriteLine("[CameraController ConnectToPiServerAsync] Pi Camera stream established. Signaling RemoteSystemReadyForActions.");
+                        SignalController.Instance.RaiseRemoteSystemReadyForActions();
+                    }
+                    else
+                    {
+                        Console.WriteLine("[CameraController ConnectToPiServerAsync WARN] Pi Camera stream is null or not readable after connect attempt. Cannot signal ready.");
+                    }
+
                     // Wait for EITHER loop task to complete
                     await Task.WhenAny(receiveTask, processingTask);
 
@@ -359,40 +371,70 @@ namespace RobotAIArm.Controllers
                 if (hadNewResult)
                 {
                     dataToShow = _latestProcessedData;
-                    _newResultAvailable = false;
+                    _newResultAvailable = false; // Consume the new result
                 }
             }
 
-            if (hadNewResult && dataToShow != null)
+            if (hadNewResult && dataToShow != null) // Ensure dataToShow itself is not null
             {
-                // Console.WriteLine($"[UiUpdateTimer] Tick - Got New Data. Bitmap: {dataToShow.ProcessedBitmap != null}, Encoders: {(dataToShow.EncoderValues == null ? "NULL" : "Present")}, Detections: {dataToShow.Detections?.Count ?? 0}");
-
-                // Update Camera Image
-                if (dataToShow.ProcessedBitmap != null && _cameraImage != null)
+                // --- Update Camera Image ---
+                if (_cameraImage != null) // Check if the UI element is available
                 {
-                    var previouslyDisplayedBitmap = _bitmapCurrentlyDisplayed;
-                    _cameraImage.Source = dataToShow.ProcessedBitmap; // Assign the NEW bitmap
-                    _bitmapCurrentlyDisplayed = dataToShow.ProcessedBitmap; // Track it
+                    Bitmap? newBitmap = dataToShow.ProcessedBitmap;
+                    Bitmap? oldBitmap = _cameraImage.Source as Bitmap;
 
-                    if (previouslyDisplayedBitmap != null && !ReferenceEquals(previouslyDisplayedBitmap, _bitmapCurrentlyDisplayed))
+                    if (newBitmap != null)
                     {
-                        previouslyDisplayedBitmap.Dispose();
+                        // We have a new, valid bitmap to display
+                        _cameraImage.Source = newBitmap;
+
+                        // If there was an old bitmap and it's different from the new one, dispose the old one.
+                        if (oldBitmap != null && !ReferenceEquals(oldBitmap, newBitmap))
+                        {
+                            // Console.WriteLine("[CameraController UI Tick] Disposing old bitmap.");
+                            oldBitmap.Dispose();
+                        }
+                    }
+                    else
+                    {
+                        // The new processed bitmap is null.
+                        // Decide what to do:
+                        // Option 1: Clear the image display
+                        // _cameraImage.Source = null; // This might be acceptable if your UI can handle it without crashing.
+                        // Option 2: Keep the last valid image (do nothing to _cameraImage.Source)
+                        Console.WriteLine("[CameraController UI Tick] New ProcessedBitmap is null. Keeping the previous image displayed (if any).");
+                        // Option 3: Set a placeholder "no signal" image if you have one
+                        // _cameraImage.Source = _noSignalPlaceholderBitmap;
                     }
                 }
 
-                // Raise event for Encoders
+                // --- Raise event for Encoders ---
                 if (dataToShow.EncoderValues != null)
                 {
+                    // It's good practice to add the log here that you had before, to confirm what's being sent:
+                    Console.WriteLine($"*** [CameraController UI Tick] Raising EncodersReceived with: {(dataToShow.EncoderValues == null ? "NULL" : string.Join(",", dataToShow.EncoderValues))} ***");
                     SignalController.Instance.RaiseEncodersReceived(dataToShow.EncoderValues);
                 }
+                else
+                {
+                    // This case should also be logged if it happens, as it means encoder values were unexpectedly null
+                    Console.WriteLine("*** [CameraController UI Tick] dataToShow.EncoderValues is NULL. Not raising EncodersReceived. ***");
+                }
 
-                // --- NEW: Raise event for Detections ---
+                if (dataToShow.TofHandValue.HasValue || dataToShow.TofCamValue.HasValue)
+                {
+                    Console.WriteLine($"*** [CameraController UI Tick] Raising TofSensorsReceived with Hand: {dataToShow.TofHandValue?.ToString() ?? "N/A"}, Cam: {dataToShow.TofCamValue?.ToString() ?? "N/A"} ***");
+                    SignalController.Instance.RaiseTofSensorsReceived(dataToShow.TofHandValue, dataToShow.TofCamValue);
+                }
+
+                // --- Raise event for Detections ---
                 if (dataToShow.Detections != null)
                 {
-                    SignalController.Instance.RaiseDetectionsReceived(dataToShow.Detections); // Assuming this event exists
+                    SignalController.Instance.RaiseDetectionsReceived(dataToShow.Detections);
                 }
             }
         }
+
         private void StopUiUpdateTimer()
         {
             if (_uiUpdateTimer != null)
@@ -491,6 +533,8 @@ namespace RobotAIArm.Controllers
                 {
                     byte[]? jpegBytes = null;
                     int[]? encoderValues = null; // Parsed values
+                    int? tofHand = null; // For TOF Hand sensor
+                    int? tofCam = null;  // For TOF Camera sensor
 
                     try
                     {
@@ -523,43 +567,66 @@ namespace RobotAIArm.Controllers
                         // --- Extract label and JPEG ---
                         int splitIndex = Array.IndexOf(packetBuffer, (byte)'\n');
                         if (splitIndex == -1) throw new FormatException("Invalid packet format (no newline)");
-                        string label = Encoding.UTF8.GetString(packetBuffer, 0, splitIndex);
+                        string labelAndSensorData = Encoding.UTF8.GetString(packetBuffer, 0, splitIndex);
                         jpegBytes = packetBuffer.AsSpan(splitIndex + 1).ToArray();
-                        Console.WriteLine($"{jpegBytes}");
+                        Console.WriteLine($"[ReceiveLoop] Full Label: {labelAndSensorData}");
 
 
-                        // --- Parse Encoders (if present) ---
-                        if (label.StartsWith("ENCODERS:"))
+                        string[] parts = labelAndSensorData.Split(':');
+                        // Example: "ENCODERS:2539,1328,1525,3502:TOF_HAND_I2C:-7:TOF_CAM_UART:65535"
+                        // parts[0] = "ENCODERS"
+                        // parts[1] = "2539,1328,1525,3502"
+                        // parts[2] = "TOF_HAND_I2C"
+                        // parts[3] = "-7"
+                        // parts[4] = "TOF_CAM_UART"
+                        // parts[5] = "65535" (or other value)
+
+                        if (parts.Length > 1 && parts[0] == "ENCODERS")
                         {
-                            // ... (Parsing logic as before) ...
-                            string valueString = label.Substring("ENCODERS:".Length);
-                            string[] parts = valueString.Split(',');
-                            if (parts.Length == 4) {
+                            string[] encoderStrings = parts[1].Split(',');
+                            if (encoderStrings.Length == 4)
+                            {
                                 encoderValues = new int[4];
-
                                 bool parseSuccess = true;
-
-                                for (int i = 0; i < 4; i++) { if (!int.TryParse(parts[i].Trim(), out encoderValues[i])) { parseSuccess = false; break; } }
-
+                                for (int i = 0; i < 4; i++)
+                                {
+                                    if (!int.TryParse(encoderStrings[i].Trim(), out encoderValues[i]))
+                                    {
+                                        parseSuccess = false;
+                                        Console.WriteLine($"[ReceiveLoop WARN] Failed to parse encoder part: '{encoderStrings[i].Trim()}'");
+                                        break;
+                                    }
+                                }
                                 if (!parseSuccess) encoderValues = null;
-                            } else { encoderValues = null; }
+                            }
+                            else { Console.WriteLine($"[ReceiveLoop WARN] Incorrect number of encoder parts: {encoderStrings.Length}"); }
                         }
+                        else { Console.WriteLine($"[ReceiveLoop WARN] 'ENCODERS:' keyword not found or malformed: {labelAndSensorData}"); }
 
-                        // --- Trigger processing task (fire-and-forget style) ---
-                        // Pass the parsed data directly to the processing method
-                        // We don't await ProcessPacketAsync here, otherwise ReceiveLoop
-                        // would block until processing finishes. We want receive to
-                        // keep reading while processing happens in the background.
-                        // Note: Error handling within ProcessPacketAsync is important.
-                        // Note: This could potentially start MANY tasks if processing is slow
-                        //       and packets arrive fast. A Channel might be better to buffer.
-                        if (jpegBytes != null)
+
+                        // Parse TOF data if available
+                        for (int i = 2; i < parts.Length - 1; i += 2) // Start looking from index 2
                         {
-                            var packet = new FrameDataPacket(jpegBytes, encoderValues);
-                            // Use WriteAsync for better backpressure handling if needed, or TryWrite
+                            if (parts[i] == "TOF_HAND_I2C")
+                            {
+                                if (int.TryParse(parts[i + 1], out int thVal)) tofHand = thVal;
+                                else Console.WriteLine($"[ReceiveLoop WARN] Failed to parse TOF_HAND_I2C value: {parts[i + 1]}");
+                            }
+                            else if (parts[i] == "TOF_CAM_UART")
+                            {
+                                if (int.TryParse(parts[i + 1], out int tcVal)) tofCam = tcVal;
+                                else Console.WriteLine($"[ReceiveLoop WARN] Failed to parse TOF_CAM_UART value: {parts[i + 1]}");
+                            }
+                        }
+                        Console.WriteLine($"[ReceiveLoop] Parsed Encoders: {(encoderValues == null ? "NULL" : string.Join(",", encoderValues))}, TOF Hand: {tofHand?.ToString() ?? "N/A"}, TOF Cam: {tofCam?.ToString() ?? "N/A"}");
+                        // --- End of corrected parsing ---
+
+
+                        if (jpegBytes != null) // jpegBytes should always be non-null if format is correct
+                        {
+                            // Pass TOF values in the packet
+                            var packet = new FrameDataPacket(jpegBytes, encoderValues, tofHand, tofCam);
                             await _processingChannel.Writer.WriteAsync(packet, token);
-                            // bool success = _processingChannel.Writer.TryWrite(packet);
-                            // if (!success) { /* Log dropped packet */ }
                         }
 
                     }
@@ -594,24 +661,36 @@ namespace RobotAIArm.Controllers
                     Bitmap? processedBitmap = imageProcessingResult.ProcessedBitmap;
                     List<DetectionResult>? detections = imageProcessingResult.Detections;
                     int[]? finalEncoderValues = packet.EncoderValues; // Encoders travelled with the packet
+                    int? finalTofHand = packet.TofHand;
+                    int? finalTofCam = packet.TofCam;
 
-                    if (processedBitmap != null || (detections != null && detections.Any())) // Store if we have a new bitmap OR new detections
+                    if (processedBitmap != null || (detections != null && detections.Any()) || finalEncoderValues != null || finalTofHand != null || finalTofCam != null)
                     {
-                        // Console.WriteLine($"[ProcessingLoop] Storing Bitmap ({(processedBitmap != null ? "NotNull" : "NULL")}) with Encoders: {(finalEncoderValues == null ? "NULL" : string.Join(",", finalEncoderValues))} and Detections: {detections?.Count ?? 0}");
+                        // +++ Pass TOF values to ProcessedData +++
+                        var newData = new ProcessedData(processedBitmap, finalEncoderValues, detections, finalTofHand, finalTofCam);
+                        Bitmap? oldBitmapToPotentiallyDisposeLater = null;
+
                         lock (_latestResultLock)
                         {
-                            // Dispose previous bitmap BEFORE assigning new one
-                            _latestProcessedData?.ProcessedBitmap?.Dispose();
+                            // We are about to replace _latestProcessedData.
+                            // If _latestProcessedData existed and held a bitmap that was never picked up by the UI timer,
+                            // that bitmap might need to be disposed. However, it's safer to let the UI timer
+                            // manage disposal of what it has shown or was about to show.
+                            // For simplicity and to avoid race conditions with UiUpdateTimer_Tick trying to read
+                            // while we dispose here, let's just replace the reference.
+                            // The old _latestProcessedData.ProcessedBitmap will be garbage collected if not referenced elsewhere,
+                            // OR it will be the one that UiUpdateTimer_Tick picked up and will dispose after showing the new one.
 
-                            _latestProcessedData = new ProcessedData(processedBitmap, finalEncoderValues, detections);
+                            _latestProcessedData = newData; // Atomically replace the data object
                             _newResultAvailable = true;
                         }
                     }
                     else
                     {
-                        // If image processing failed, ensure the returned (null) bitmap is handled (no-op if already null)
-                        processedBitmap?.Dispose(); // This will be null if processing failed
-                        Console.WriteLine("[ProcessingLoop] No new bitmap or detections to store.");
+                        // If the new processing result did not yield a bitmap (e.g., processing failed),
+                        // dispose the newly created (but null or invalid) bitmap from imageProcessingResult if it's not null.
+                        imageProcessingResult.ProcessedBitmap?.Dispose();
+                        Console.WriteLine("[ProcessingLoop] No new valid bitmap or detections to store from this packet.");
                     }
                 }
             }
@@ -619,10 +698,16 @@ namespace RobotAIArm.Controllers
             finally
             {
                 Console.WriteLine("[ProcessingLoop] Exiting loop.");
-                lock (_latestResultLock) { _latestProcessedData?.ProcessedBitmap?.Dispose(); _latestProcessedData = null; }
+                lock (_latestResultLock)
+                {
+                    _latestProcessedData?.ProcessedBitmap?.Dispose(); // Dispose the last available processed bitmap
+                    _latestProcessedData = null;
+                }
             }
             Console.WriteLine("[ProcessingLoop] Ended.");
         }
+        
+        
         //// --- Send Command ---
         private async Task<int[]?> ProcessEncoderTaskAsync(int[]? encoderValues, CancellationToken cancellationToken)
         {

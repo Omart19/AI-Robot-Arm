@@ -34,6 +34,11 @@ namespace RobotAIArm.Controllers
         private StreamWriter? _commandWriter;
         private bool connected = false;
 
+        //public ArduinoController()
+        //{
+        //    // ...
+        //    _arduinoCts = new CancellationTokenSource(); // Initial CTS
+        //}
 
         // Set the COM port manually (used by normal mode)
         public void SetPort(string portName)
@@ -59,13 +64,23 @@ namespace RobotAIArm.Controllers
         }
         public void StartArduinoThread()
         {
-            if (_arduinoThread == null || !_arduinoThreadRunning)
+            if (!_arduinoThreadRunning) // Use the flag to check
             {
+                _arduinoCts?.Dispose(); // Dispose previous CTS if any
+                _arduinoCts = new CancellationTokenSource();
+
+                // Re-initialize BlockingCollection if it was completed/disposed
+                if (_arduinoCommandQueue == null || _arduinoCommandQueue.IsAddingCompleted)
+                {
+                    _arduinoCommandQueue = new BlockingCollection<string>();
+                }
+
                 _arduinoThread = new Thread(ArduinoThreadWorker);
-                _arduinoThread.IsBackground = true; // Important: Allow app to exit
-                _arduinoThread.Start(AppSettings.Instance.RemoteIP); // Pass the IP
-                _arduinoThreadRunning = true;
-                Console.WriteLine("[CameraController] Arduino thread started.");
+                _arduinoThread.IsBackground = true;
+                _arduinoThread.Name = "ArduinoCommandThread";
+                _arduinoThreadRunning = true; // Set flag before starting
+                _arduinoThread.Start(AppSettings.Instance.RemoteIP);
+                Console.WriteLine("[ArduinoController] Arduino command thread started.");
             }
             else
             {
@@ -104,125 +119,159 @@ namespace RobotAIArm.Controllers
         }
         public void StopArduinoThread()
         {
-            // --- START ADDED LOGGING ---
-            string callStack = Environment.StackTrace; // Get the call stack
-            Console.WriteLine($"[DEBUG StopArduinoThread] CALLED. _arduinoThreadRunning was: {_arduinoThreadRunning}. Thread is {(_arduinoThread == null ? "null" : "not null")}.");
-            Console.WriteLine($"[DEBUG StopArduinoThread] Call Stack:\n{callStack}");
-            // --- END ADDED LOGGING ---
-
-            if (_arduinoThread != null && _arduinoThreadRunning)
+            Console.WriteLine($"[ArduinoController DEBUG StopArduinoThread] CALLED. _arduinoThreadRunning was: {_arduinoThreadRunning}.");
+            if (_arduinoThreadRunning) // Check the flag
             {
-                _arduinoCommandQueue.CompleteAdding();
-                Console.WriteLine($"[DEBUG StopArduinoThread] Called CompleteAdding. Joining thread...");
-                bool joined = _arduinoThread.Join(1000);
-                Console.WriteLine($"[DEBUG StopArduinoThread] Thread join completed: {joined}. IsAlive: {_arduinoThread?.IsAlive}");
+                _arduinoThreadRunning = false; // Set flag immediately to signal loop to stop
 
-                if (!joined && _arduinoThread != null && _arduinoThread.IsAlive)
+                _arduinoCts?.Cancel(); // Signal cancellation to tasks/blocking calls
+
+                // Signal the BlockingCollection that no more items will be added.
+                // This will cause Take() to throw InvalidOperationException if the queue becomes empty.
+                if (_arduinoCommandQueue != null && !_arduinoCommandQueue.IsAddingCompleted)
                 {
-                    // _arduinoThread.Interrupt(); // Generally avoid if possible
-                    Console.WriteLine("[CameraController] Arduino thread join timed out but was still alive. Proceeding to mark as stopped.");
+                    _arduinoCommandQueue.CompleteAdding();
+                    Console.WriteLine($"[ArduinoController DEBUG StopArduinoThread] Called CompleteAdding on queue.");
                 }
-                _arduinoThread = null;
-                _arduinoThreadRunning = false; // Flag set to false
-                CleanupArduinoResources();
-                Console.WriteLine("[CameraController] Arduino thread stopped. _arduinoThreadRunning is now false.");
+
+                if (_arduinoThread != null && _arduinoThread.IsAlive)
+                {
+                    Console.WriteLine($"[ArduinoController DEBUG StopArduinoThread] Attempting to join Arduino thread...");
+                    bool joined = _arduinoThread.Join(1500); // Increased timeout slightly
+                    Console.WriteLine($"[ArduinoController DEBUG StopArduinoThread] Arduino thread join completed: {joined}. IsAlive after join: {_arduinoThread?.IsAlive}");
+                    if (!joined && _arduinoThread.IsAlive)
+                    {
+                        Console.WriteLine("[ArduinoController WARN StopArduinoThread] Arduino thread did not join in time.");
+                        // Avoid Thread.Abort() if possible. The CancellationToken and loop flag should handle it.
+                    }
+                }
+                _arduinoThread = null; // Null out the thread object
             }
             else
             {
-                Console.WriteLine($"[CameraController] Arduino thread already not running or null when StopArduinoThread was called again. _arduinoThreadRunning: {_arduinoThreadRunning}");
+                Console.WriteLine($"[ArduinoController DEBUG StopArduinoThread] Arduino thread was already not running or null.");
             }
+            // Cleanup resources regardless, as they might be in an inconsistent state if thread didn't stop cleanly
+            CleanupArduinoResources();
+            Console.WriteLine("[ArduinoController DEBUG StopArduinoThread] StopArduinoThread finished.");
         }
-        private async void ArduinoThreadWorker(object? obj) // Changed to async void
+
+        private async void ArduinoThreadWorker(object? obj) // Keep async void if it's a top-level thread method
         {
-            string serverIp = (string)obj;
-            int serverPort = 23457;
-            try
+            string serverIp = (string)obj!; // Assuming obj is never null here based on StartArduinoThread
+            int serverPort = 23457;        // _arduinoServerPort
+
+            while (_arduinoThreadRunning) // Outer loop for maintaining connection
             {
-                // --- Connect to Arduino Command Server (Persistent Connection) ---
-                while (!connected) // Keep trying to connect until exit condition
+                if (!connected) // Check if we need to connect/reconnect
                 {
                     try
                     {
+                        Console.WriteLine($"[ArduinoThread] Attempting to connect to {serverIp}:{serverPort}...");
                         _commandClient = new TcpClient();
-                        await _commandClient.ConnectAsync(serverIp, serverPort);
-                        _commandStream = _commandClient.GetStream();
-                        _commandWriter = new StreamWriter(_commandStream, Encoding.UTF8) { AutoFlush = true };
-                        Console.WriteLine("[ArduinoThread] Connected to Arduino command server.");
-                        connected = true;
-                        break; // Connection successful, exit the connection loop
+                        // Use a timeout for connection attempts
+                        var connectTask = _commandClient.ConnectAsync(serverIp, serverPort);
+                        if (await Task.WhenAny(connectTask, Task.Delay(3000, _arduinoCts?.Token ?? CancellationToken.None)) == connectTask && connectTask.IsCompletedSuccessfully)
+                        {
+                            _commandStream = _commandClient.GetStream();
+                            _commandWriter = new StreamWriter(_commandStream, Encoding.UTF8) { AutoFlush = true };
+                            Console.WriteLine("[ArduinoThread] Connected to Arduino command server.");
+                            connected = true;
+                        }
+                        else
+                        {
+                            Console.WriteLine("[ArduinoThread] Connection attempt timed out or failed.");
+                            _commandClient?.Dispose(); // Dispose if connect failed
+                            _commandClient = null;
+                            if (!_arduinoThreadRunning) break; // Exit if stop was requested during connect attempt
+                            await Task.Delay(2000, _arduinoCts?.Token ?? CancellationToken.None); // Wait before retrying connection
+                            continue; // Retry connection
+                        }
                     }
-                    catch (SocketException sockEx)
+                    catch (OperationCanceledException)
                     {
-                        Console.WriteLine($"[ArduinoThread] Socket Exception: {sockEx.Message}. Reconnecting in 2 seconds...");
-                        CleanupArduinoResources(); // Clean up resources before retry
-                        await Task.Delay(2000);    // Wait before retrying
+                        Console.WriteLine("[ArduinoThread] Connection attempt cancelled.");
+                        _arduinoThreadRunning = false; // Ensure loop terminates
+                        break;
                     }
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[ArduinoThread] Error connecting: {ex.Message}");
-                        CleanupArduinoResources();
-                        break; // Exit on unexpected error
+                        CleanupArduinoResources(); // Clears _commandClient, _commandStream, _commandWriter
+                        if (!_arduinoThreadRunning) break;
+                        await Task.Delay(2000, _arduinoCts?.Token ?? CancellationToken.None); // Wait before retrying
+                        continue; // Retry connection
                     }
                 }
-                Console.WriteLine("[ArduinoThread] starting command loop.");
 
-                try
+                // Process commands if connected
+                if (connected && _commandWriter != null)
                 {
-                    // --- Process Commands (Continuous Loop) ---
-                    while (_arduinoThreadRunning) // Use the running flag as the main loop condition
+                    string? commandToSend = null;
+                    try
                     {
+                        // Take one command. This will block if the queue is empty until a command is added
+                        // or until CompleteAdding is called (then throws InvalidOperationException).
+                        // Use CancellationToken for Take if _arduinoCts is available and used for stopping.
+                        commandToSend = _arduinoCommandQueue.Take(_arduinoCts?.Token ?? CancellationToken.None);
 
-                        string? command = null;
-                        //try
-                        //{
-                        if (_arduinoCommandQueue.Count >= 1)
+                        if (!string.IsNullOrEmpty(commandToSend))
                         {
-                            
-                                command = _arduinoCommandQueue.Last();
-                                _commandWriter.WriteLine(command); // Send command
+                            await _commandWriter.WriteLineAsync(commandToSend);
+                            Console.WriteLine($"[ArduinoThread] Sent command: {commandToSend}");
 
-                            
-
+                            // OPTIONAL: Add a small delay here to pace commands sent to the Pi/Arduino.
+                            // This gives the Pi/Arduino time to process one command before the next.
+                            // Adjust the delay as needed (e.g., 20-50ms).
+                            await Task.Delay(5, _arduinoCts?.Token ?? CancellationToken.None); // e.g., 30ms delay
                         }
-                        //catch (InvalidOperationException)
-                        //{
-                        //    // Thrown when CompleteAdding is called and queue is empty
-                        //    Console.WriteLine("[ArduinoThread] Command queue is completing.");
-                        //    break; // Exit the loop
-                        //}
-
-                        //if (!string.IsNullOrEmpty(command))
-                        //{
-
-                        //    _commandWriter.WriteLine(command); // Send command
-                        //    Console.WriteLine($"[ArduinoThread] Sent command: {command}");
-
-
-                        //}
-                        
-                        
-                        //_arduinoCommandQueue = new BlockingCollection<string>();
-                        ClearArduinoCommandQueue();
-                        Thread.Sleep(1); // Small delay to prevent tight-looping
-
+                    }
+                    catch (InvalidOperationException) // Thrown by Take if CompleteAdding has been called and queue is empty.
+                    {
+                        Console.WriteLine("[ArduinoThread] Command queue completed, worker stopping.");
+                        _arduinoThreadRunning = false; // Signal main loop to exit
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Console.WriteLine("[ArduinoThread] Take operation cancelled, worker stopping.");
+                        _arduinoThreadRunning = false; // Signal main loop to exit
+                    }
+                    catch (IOException ioEx) // Covers network errors during WriteLineAsync
+                    {
+                        Console.WriteLine($"[ArduinoThread] IOException sending command '{commandToSend}': {ioEx.Message}. Assuming disconnect.");
+                        connected = false; // Trigger reconnect logic in the outer loop
+                        CleanupArduinoResources();
+                        // Optionally, re-enqueue commandToSend if it's critical and hasn't been processed.
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[ArduinoThread] Error sending command '{commandToSend}': {ex.Message}");
+                        // Decide if this error means a disconnect or if we can continue.
+                        // If it might be a disconnect:
+                        // connected = false;
+                        // CleanupArduinoResources();
+                        if (_arduinoThreadRunning)
+                        { // Avoid delay if stopping
+                            try { await Task.Delay(100, _arduinoCts?.Token ?? CancellationToken.None); } catch { /* ignore cancellation on delay */ }
+                        }
                     }
                 }
-                catch (Exception ex)
+                else if (connected && _commandWriter == null) // Should not happen if connected is true
                 {
-                    Console.WriteLine($"[ArduinoThread] Unexpected error starting command loop: {ex.Message}");
+                    Console.WriteLine("[ArduinoThread] Error: Connected but _commandWriter is null. Forcing reconnect.");
+                    connected = false;
+                    CleanupArduinoResources();
                 }
+            } // End while (_arduinoThreadRunning)
 
-            }
-            finally
+            // Final cleanup when thread is exiting
+            CleanupArduinoResources();
+            if (_arduinoCommandQueue != null && !_arduinoCommandQueue.IsAddingCompleted)
             {
-                CleanupArduinoResources();
-                _arduinoCommandQueue.CompleteAdding(); // Signal any waiting consumers
-                _arduinoCommandQueue.Dispose();
-                _arduinoThreadRunning = false;
-                Console.WriteLine("[ArduinoThread] Arduino thread ended.");
+                _arduinoCommandQueue.CompleteAdding();
             }
+            Console.WriteLine("[ArduinoThread] Arduino thread fully ended.");
         }
-
 
 
         public void EnqueueArduinoCommand(string command)
