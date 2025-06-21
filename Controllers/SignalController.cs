@@ -24,6 +24,8 @@ namespace RobotAIArm.Controllers
 
         public event Action? RobotControllerReadyForHomingCheck;
 
+        private List<DetectionResult>? _lastDetections = null;
+        private readonly object _lastDetectionsLock = new object();
 
         // --- Define Events ---
         public event Action<bool>? ModeChanged;
@@ -96,6 +98,11 @@ namespace RobotAIArm.Controllers
                 Console.WriteLine($"[SignalController] Invoking DetectionsReceived for {handler.GetInvocationList().Length} external subscribers with {detections?.Count ?? 0} detections.");
                 try
                 {
+                    lock (_lastDetectionsLock)
+                    {
+                        // Store a copy of the detections list
+                        _lastDetections = detections?.ToList(); // .ToList() creates a shallow copy
+                    }
                     handler.Invoke(detections);
                 }
                 catch (Exception ex)
@@ -139,6 +146,20 @@ namespace RobotAIArm.Controllers
                 Console.WriteLine($"[SignalController-IntegratedProcessing] Error during internal detection processing: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// Gets a copy of the last received list of detections.
+        /// Returns null if no detections have been received yet.
+        /// </summary>
+        public List<DetectionResult>? GetLastDetections()
+        {
+            lock (_lastDetectionsLock)
+            {
+                // Return a copy to prevent external modification of the internal list
+                return _lastDetections?.ToList();
+            }
+        }
+
         public void RaiseRawFrameReceived(byte[] frameBytes) => RawFrameReceived?.Invoke(frameBytes);
 
         public void RaiseProcessedFrameReceived(byte[] frameBytes) => ProcessedFrameReceived?.Invoke(frameBytes);

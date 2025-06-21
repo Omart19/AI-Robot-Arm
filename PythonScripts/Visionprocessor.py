@@ -95,7 +95,7 @@ try:  # <<< Add try-finally to ensure client closes on error >>>
 
         for i in range(detections_output.shape[2]):
             confidence = float(detections_output[0, 0, i, 2])  # <<< Convert to float for JSON >>>
-            if confidence > 0.5:
+            if confidence > 0.3:
                 idx = int(detections_output[0, 0, i, 1])
                 label = classNames[idx] if idx < len(classNames) else "unknown"
 

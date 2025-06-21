@@ -213,6 +213,7 @@ namespace RobotAIArm.Controllers
                         // Take one command. This will block if the queue is empty until a command is added
                         // or until CompleteAdding is called (then throws InvalidOperationException).
                         // Use CancellationToken for Take if _arduinoCts is available and used for stopping.
+                        //commandToSend = _arduinoCommandQueue.Take(_arduinoCts?.Token ?? CancellationToken.None);
                         commandToSend = _arduinoCommandQueue.Take(_arduinoCts?.Token ?? CancellationToken.None);
 
                         if (!string.IsNullOrEmpty(commandToSend))
@@ -223,7 +224,7 @@ namespace RobotAIArm.Controllers
                             // OPTIONAL: Add a small delay here to pace commands sent to the Pi/Arduino.
                             // This gives the Pi/Arduino time to process one command before the next.
                             // Adjust the delay as needed (e.g., 20-50ms).
-                            await Task.Delay(5, _arduinoCts?.Token ?? CancellationToken.None); // e.g., 30ms delay
+                            await Task.Delay(1, _arduinoCts?.Token ?? CancellationToken.None); // e.g., 30ms delay
                         }
                     }
                     catch (InvalidOperationException) // Thrown by Take if CompleteAdding has been called and queue is empty.

@@ -62,6 +62,23 @@ namespace RobotAIArm.ViewModels.Tools
             "encoder_calibration.json");
         private bool _startupHomingRequestAttempted = false; // Prevents multiple requests
 
+        /// <summary>
+        /// Gets the current processed angle for a specific encoder index.
+        /// Returns null if the angle is not available or the index is invalid.
+        /// </summary>
+        /// <param name="encoderIndex">The index of the encoder (0 for Base, 1 for Lower, 2 for Middle, 3 for Upper).</param>
+        /// <returns>The processed angle in degrees, or null.</returns>
+        public double? GetSpecificAngle(int encoderIndex)
+        {
+            return encoderIndex switch
+            {
+                0 => BaseAngle,
+                1 => LowerJointAngle,
+                2 => MiddleJointAngle,
+                3 => UpperJointAngle,
+                _ => null // Invalid index
+            };
+        }
 
         // --- Constructor ---
         public Tool2ViewModel()

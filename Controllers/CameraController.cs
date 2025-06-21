@@ -525,35 +525,34 @@ namespace RobotAIArm.Controllers
         // --- ReceiveLoopAsync (Producer) ---
         private async Task ReceiveLoopAsync(CancellationToken token)
         {
-            if (_networkStream == null || _cts == null) { /* ... null check log ... */ return; }
-            Console.WriteLine("[ReceiveLoop] Starting (Minimal Version)...");
+            if (_networkStream == null || _cts == null) { Console.WriteLine("[ReceiveLoop ERR] Stream or CTS is null."); return; }
+            Console.WriteLine("[ReceiveLoop] Starting (with TOF parsing)...");
             try
             {
                 while (!token.IsCancellationRequested)
                 {
+                    //byte[] packetBuffer = null;
                     byte[]? jpegBytes = null;
-                    int[]? encoderValues = null; // Parsed values
-                    int? tofHand = null; // For TOF Hand sensor
-                    int? tofCam = null;  // For TOF Camera sensor
+                    int[]? encoderValues = null;
+                    int? tofHand = null;
+                    int? tofCam = null;
 
                     try
                     {
-                        // Step 1: Read frame (Keep existing logic)
                         byte[] sizeBuffer = new byte[4];
                         int read = await _networkStream.ReadAsync(sizeBuffer, 0, 4, token);
                         if (read == 0) { Console.WriteLine("[ReceiveLoop] Server closed connection (read size 0)."); break; }
                         if (read != 4)
                         {
-                            // Instead of throwing, log and skip to the next loop iteration
                             Console.WriteLine($"[ReceiveLoop WARN] Failed to read packet size header fully (read {read}/4 bytes). Skipping packet.");
-                            // Attempt to clear the read buffer slightly? Optional, might help resync.
-                            await Task.Delay(10, token); // Small delay
+                            await Task.Delay(10, token);
                             byte[] discardBuffer = new byte[1024];
                             while (_networkStream.DataAvailable) { await _networkStream.ReadAsync(discardBuffer, 0, discardBuffer.Length, token); }
-                            continue; // Go to the next iteration of the while loop
+                            continue;
                         }
                         int packetSize = BitConverter.ToInt32(sizeBuffer.Reverse().ToArray(), 0);
-                        if (packetSize <= 0 || packetSize > 50_000_000) throw new IOException($"Invalid packet size: {packetSize}");
+                        if (packetSize <= 0 || packetSize > 50_000_000) { Console.WriteLine($"[ReceiveLoop WARN] Invalid packet size: {packetSize}. Skipping."); continue; }
+
 
                         byte[] packetBuffer = new byte[packetSize];
                         int bytesRead = 0;
@@ -564,150 +563,132 @@ namespace RobotAIArm.Controllers
                             bytesRead += chunk;
                         }
 
-                        // --- Extract label and JPEG ---
                         int splitIndex = Array.IndexOf(packetBuffer, (byte)'\n');
-                        if (splitIndex == -1) throw new FormatException("Invalid packet format (no newline)");
+                        if (splitIndex == -1)
+                        {
+                            Console.WriteLine("[ReceiveLoop WARN] Invalid packet format (no newline). Skipping packet.");
+                            continue;
+                        }
                         string labelAndSensorData = Encoding.UTF8.GetString(packetBuffer, 0, splitIndex);
                         jpegBytes = packetBuffer.AsSpan(splitIndex + 1).ToArray();
-                        Console.WriteLine($"[ReceiveLoop] Full Label: {labelAndSensorData}");
+                        Console.WriteLine($"[ReceiveLoop] Full Label String: {labelAndSensorData}");
 
+                        string[] allParts = labelAndSensorData.Split(':');
+                        // Example: "ENCODERS:val1,val2,val3,val4:TOF_HAND_I2C:tof_h_val:TOF_CAM_UART:tof_c_val"
 
-                        string[] parts = labelAndSensorData.Split(':');
-                        // Example: "ENCODERS:2539,1328,1525,3502:TOF_HAND_I2C:-7:TOF_CAM_UART:65535"
-                        // parts[0] = "ENCODERS"
-                        // parts[1] = "2539,1328,1525,3502"
-                        // parts[2] = "TOF_HAND_I2C"
-                        // parts[3] = "-7"
-                        // parts[4] = "TOF_CAM_UART"
-                        // parts[5] = "65535" (or other value)
-
-                        if (parts.Length > 1 && parts[0] == "ENCODERS")
+                        if (allParts.Length > 1 && allParts[0].Trim().ToUpper() == "ENCODERS")
                         {
-                            string[] encoderStrings = parts[1].Split(',');
-                            if (encoderStrings.Length == 4)
+                            string[] encoderStrValues = allParts[1].Split(',');
+                            if (encoderStrValues.Length == 4)
                             {
                                 encoderValues = new int[4];
-                                bool parseSuccess = true;
+                                bool encodersParsedSuccessfully = true;
                                 for (int i = 0; i < 4; i++)
                                 {
-                                    if (!int.TryParse(encoderStrings[i].Trim(), out encoderValues[i]))
+                                    if (!int.TryParse(encoderStrValues[i].Trim(), out encoderValues[i]))
                                     {
-                                        parseSuccess = false;
-                                        Console.WriteLine($"[ReceiveLoop WARN] Failed to parse encoder part: '{encoderStrings[i].Trim()}'");
+                                        Console.WriteLine($"[ReceiveLoop WARN] Failed to parse encoder value: {encoderStrValues[i]}");
+                                        encodersParsedSuccessfully = false;
                                         break;
                                     }
                                 }
-                                if (!parseSuccess) encoderValues = null;
+                                if (!encodersParsedSuccessfully) encoderValues = null;
                             }
-                            else { Console.WriteLine($"[ReceiveLoop WARN] Incorrect number of encoder parts: {encoderStrings.Length}"); }
-                        }
-                        else { Console.WriteLine($"[ReceiveLoop WARN] 'ENCODERS:' keyword not found or malformed: {labelAndSensorData}"); }
-
-
-                        // Parse TOF data if available
-                        for (int i = 2; i < parts.Length - 1; i += 2) // Start looking from index 2
-                        {
-                            if (parts[i] == "TOF_HAND_I2C")
+                            else
                             {
-                                if (int.TryParse(parts[i + 1], out int thVal)) tofHand = thVal;
-                                else Console.WriteLine($"[ReceiveLoop WARN] Failed to parse TOF_HAND_I2C value: {parts[i + 1]}");
-                            }
-                            else if (parts[i] == "TOF_CAM_UART")
-                            {
-                                if (int.TryParse(parts[i + 1], out int tcVal)) tofCam = tcVal;
-                                else Console.WriteLine($"[ReceiveLoop WARN] Failed to parse TOF_CAM_UART value: {parts[i + 1]}");
+                                Console.WriteLine($"[ReceiveLoop WARN] Incorrect number of encoder values. Expected 4, got {encoderStrValues.Length}. Data: {allParts[1]}");
                             }
                         }
-                        Console.WriteLine($"[ReceiveLoop] Parsed Encoders: {(encoderValues == null ? "NULL" : string.Join(",", encoderValues))}, TOF Hand: {tofHand?.ToString() ?? "N/A"}, TOF Cam: {tofCam?.ToString() ?? "N/A"}");
-                        // --- End of corrected parsing ---
-
-
-                        if (jpegBytes != null) // jpegBytes should always be non-null if format is correct
+                        else
                         {
-                            // Pass TOF values in the packet
+                            Console.WriteLine($"[ReceiveLoop WARN] 'ENCODERS:' keyword not found or malformed at the beginning of: {labelAndSensorData}");
+                        }
+
+                        // Search for TOF keys and their values
+                        for (int i = 0; i < allParts.Length - 1; i++) // Iterate up to second to last element
+                        {
+                            if (allParts[i].Trim().ToUpper() == "TOF_HAND_I2C")
+                            {
+                                if (int.TryParse(allParts[i + 1].Trim(), out int thVal))
+                                    tofHand = thVal;
+                                else
+                                    Console.WriteLine($"[ReceiveLoop WARN] Failed to parse TOF_HAND_I2C value: '{allParts[i + 1]}'");
+                                i++; // Skip the value part in next iteration
+                            }
+                            else if (allParts[i].Trim().ToUpper() == "TOF_CAM_UART")
+                            {
+                                if (int.TryParse(allParts[i + 1].Trim(), out int tcVal))
+                                    tofCam = tcVal;
+                                else
+                                    Console.WriteLine($"[ReceiveLoop WARN] Failed to parse TOF_CAM_UART value: '{allParts[i + 1]}'");
+                                i++; // Skip the value part
+                            }
+                        }
+                        Console.WriteLine($"[ReceiveLoop] Parsed: Encoders={(encoderValues == null ? "N/A" : string.Join(",", encoderValues))}, TOF_Hand={tofHand?.ToString() ?? "N/A"}, TOF_Cam={tofCam?.ToString() ?? "N/A"}");
+
+
+                        if (jpegBytes != null) // Should always be true if splitIndex was found
+                        {
                             var packet = new FrameDataPacket(jpegBytes, encoderValues, tofHand, tofCam);
                             await _processingChannel.Writer.WriteAsync(packet, token);
                         }
-
                     }
                     catch (OperationCanceledException) { break; }
                     catch (IOException ioEx) { Console.WriteLine($"[ReceiveLoop IO ERROR] {ioEx.Message}"); break; }
-                    catch (Exception ex) { /* ... log, continue ... */ Console.WriteLine($"[ReceiveLoop PACKET ERROR] {ex.Message}"); continue; }
-
-                    // --- REMOVED Channel writing ---
-
-                } // End while
+                    catch (Exception ex) { Console.WriteLine($"[ReceiveLoop PACKET ERROR] {ex.Message}"); continue; }
+                }
             }
             finally
             {
                 Console.WriteLine("[ReceiveLoop] Exiting loop.");
-                // --- REMOVED Channel completion ---
             }
             Console.WriteLine("[ReceiveLoop] Ended.");
         }
 
+        // Update ProcessingLoopAsync to handle new FrameDataPacket structure
         private async Task ProcessingLoopAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine("[ProcessingLoop] Starting (Orchestrates Image/Encoder/Detection Tasks)...");
+            Console.WriteLine("[ProcessingLoop] Starting (passing TOF through)...");
             try
             {
                 await foreach (FrameDataPacket packet in _processingChannel.Reader.ReadAllAsync(cancellationToken))
                 {
                     if (cancellationToken.IsCancellationRequested) break;
 
-                    // ProcessImageTaskAsync now handles Python communication and returns bitmap + detections
                     var imageProcessingResult = await ProcessImageTaskAsync(packet.JpegBytes, cancellationToken);
 
-                    Bitmap? processedBitmap = imageProcessingResult.ProcessedBitmap;
-                    List<DetectionResult>? detections = imageProcessingResult.Detections;
-                    int[]? finalEncoderValues = packet.EncoderValues; // Encoders travelled with the packet
-                    int? finalTofHand = packet.TofHand;
-                    int? finalTofCam = packet.TofCam;
+                    // Pass all data from the packet along
+                    var newData = new ProcessedData(
+                        imageProcessingResult.ProcessedBitmap,
+                        packet.EncoderValues,
+                        imageProcessingResult.Detections,
+                        packet.TofHand, // Pass TOF Hand
+                        packet.TofCam   // Pass TOF Cam
+                    );
 
-                    if (processedBitmap != null || (detections != null && detections.Any()) || finalEncoderValues != null || finalTofHand != null || finalTofCam != null)
+                    lock (_latestResultLock)
                     {
-                        // +++ Pass TOF values to ProcessedData +++
-                        var newData = new ProcessedData(processedBitmap, finalEncoderValues, detections, finalTofHand, finalTofCam);
-                        Bitmap? oldBitmapToPotentiallyDisposeLater = null;
-
-                        lock (_latestResultLock)
-                        {
-                            // We are about to replace _latestProcessedData.
-                            // If _latestProcessedData existed and held a bitmap that was never picked up by the UI timer,
-                            // that bitmap might need to be disposed. However, it's safer to let the UI timer
-                            // manage disposal of what it has shown or was about to show.
-                            // For simplicity and to avoid race conditions with UiUpdateTimer_Tick trying to read
-                            // while we dispose here, let's just replace the reference.
-                            // The old _latestProcessedData.ProcessedBitmap will be garbage collected if not referenced elsewhere,
-                            // OR it will be the one that UiUpdateTimer_Tick picked up and will dispose after showing the new one.
-
-                            _latestProcessedData = newData; // Atomically replace the data object
-                            _newResultAvailable = true;
-                        }
-                    }
-                    else
-                    {
-                        // If the new processing result did not yield a bitmap (e.g., processing failed),
-                        // dispose the newly created (but null or invalid) bitmap from imageProcessingResult if it's not null.
-                        imageProcessingResult.ProcessedBitmap?.Dispose();
-                        Console.WriteLine("[ProcessingLoop] No new valid bitmap or detections to store from this packet.");
+                        _latestProcessedData?.ProcessedBitmap?.Dispose(); // Dispose previous bitmap if any
+                        _latestProcessedData = newData;
+                        _newResultAvailable = true;
                     }
                 }
             }
-            // ... (Existing catch blocks for OperationCanceled, ChannelClosed, general Exception) ...
+            catch (OperationCanceledException) { Console.WriteLine("[ProcessingLoop] Cancelled."); }
+            catch (ChannelClosedException) { Console.WriteLine("[ProcessingLoop] Channel closed."); }
+            catch (Exception ex) { Console.WriteLine($"[ProcessingLoop ERROR] {ex.GetType().Name}: {ex.Message}"); }
             finally
             {
                 Console.WriteLine("[ProcessingLoop] Exiting loop.");
                 lock (_latestResultLock)
                 {
-                    _latestProcessedData?.ProcessedBitmap?.Dispose(); // Dispose the last available processed bitmap
+                    _latestProcessedData?.ProcessedBitmap?.Dispose();
                     _latestProcessedData = null;
                 }
             }
             Console.WriteLine("[ProcessingLoop] Ended.");
         }
-        
-        
+
         //// --- Send Command ---
         private async Task<int[]?> ProcessEncoderTaskAsync(int[]? encoderValues, CancellationToken cancellationToken)
         {
