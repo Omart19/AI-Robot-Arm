@@ -1,7 +1,7 @@
 # Robot AI Arm
 
 
-##Items:
+## Items:
 Steppers: https://a.co/d/iiJf8Wz
 Stepper drivers: https://a.co/d/dlJRYvP
 55mm screws: https://a.co/d/g2Emexe
