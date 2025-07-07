@@ -1,6 +1,13 @@
 # Robot AI Arm
 
 
+## Video Links:
+### Software:
+https://youtu.be/Ny3csvNJm78
+
+### Hardware:
+https://youtu.be/vSIQqDmVzqs
+
 ## Items:
 Steppers: https://a.co/d/iiJf8Wz
 Stepper drivers: https://a.co/d/dlJRYvP
