@@ -10,7 +10,9 @@ https://youtu.be/vSIQqDmVzqs
 
 ## Items:
 Steppers: https://a.co/d/iiJf8Wz
+
 Stepper drivers: https://a.co/d/dlJRYvP
+
 55mm screws: https://a.co/d/g2Emexe
 
 55mm screw nut: https://a.co/d/gLMvXZo
