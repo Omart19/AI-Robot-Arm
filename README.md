@@ -66,7 +66,7 @@ Wiring: Cable management is a known area for improvement in the current design. 
 
 Raspberry Pi Camera Module (Pi Camera Noir 3 recommended): The camera is positioned at the front of the arm. Be mindful of the TOF sensor potentially pushing against the camera. A solution involves screwing the camera mounting screws in deeper on all sides to create a space between the TOF sensor and the camera.
 
-![Robot arm ai wireing guide_250703_182612.pdf](https://github.com/Omart19/AI-Robot-Arm/blob/c01de4e7e4336e17fcfd561a30be6d7fbdb2581e/Robot%20arm%20ai%20wireing%20guide_250703_182612.pdf)
+![Robot arm ai wiring guide_250703_182612.pdf](https://github.com/Omart19/AI-Robot-Arm/blob/c01de4e7e4336e17fcfd561a30be6d7fbdb2581e/Robot%20arm%20ai%20wireing%20guide_250703_182612.pdf)
 
 ## Getting Started
 To get your AI Robot Arm up and running:
